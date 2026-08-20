@@ -1,0 +1,225 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# configs/phase1_config.yaml
+# Phase 1 configuration: small public dataset, pipeline verification.
+# Run: python main.py --phase 1 --config configs/phase1_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Runtime mode ──────────────────────────────────────────────────────────────
+# Options:
+#   "colab"       — CUDA + QLoRA (bitsandbytes + Unsloth). Use on Colab T4.
+#   "local_mps"   — Apple MPS + LoRA bfloat16 (no quantisation). Use on M1/M5 Mac.
+#   "local_cpu"   — CPU + LoRA float32 (smoke test only, very slow). Use anywhere.
+device_mode: "local_mps"   # change to "colab" when running on Colab
+
+# ── Reproducibility ───────────────────────────────────────────────────────────
+seed: 42
+
+# ── Pipeline steps to run ────────────────────────────────────────────────────
+# Set any step to false to skip it (useful for re-running specific steps).
+pipeline:
+  run_clustering:       true   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
+  run_preprocessing:    true   # Group by cluster, select top-k, save grouped CSV
+  run_label_generation: true   # Call frontier LLM, generate 5 labels per cluster
+  run_finetuning:       true   # QLoRA / LoRA fine-tune the student SLM
+  run_baseline_eval:    true   # Evaluate vanilla (pre-distillation) SLM
+  run_finetuned_eval:   true   # Evaluate fine-tuned SLM
+  run_llm_judge:        true   # LLM-as-judge evaluation (Claude Haiku)
+  run_business_eval:    true   # Latency, cost, throughput metrics
+
+# ── Checkpointing ────────────────────────────────────────────────────────────
+# Set use_checkpoints: false to recompute everything from scratch.
+checkpoints:
+  use_checkpoints: true
+  embeddings_file:   "checkpoints/phase1_embeddings.pkl"
+  umap_file:         "checkpoints/phase1_umap.pkl"
+  clustering_file:   "checkpoints/phase1_clustering.csv"
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# For Colab: set drive_root to "/content/drive/MyDrive/slm-distillation"
+# For local:  set drive_root to an absolute path on your machine
+paths:
+  drive_root:          "."                         # override in Colab
+  data_raw:            "{drive_root}/data/raw"
+  data_processed:      "{drive_root}/data/processed"
+  checkpoints:         "{drive_root}/data/checkpoints"
+  outputs:             "{drive_root}/outputs"
+  labels_out:          "{drive_root}/outputs/labels"
+  models_out:          "{drive_root}/outputs/models"
+  evaluation_out:      "{drive_root}/outputs/evaluation"
+  hf_cache:            "{drive_root}/hf_cache"     # caches model weights on Drive
+
+# ── Dataset ───────────────────────────────────────────────────────────────────
+dataset:
+  name:          "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
+  domain:        "IT"                              # IT | HR | CX
+  # Bitext categories used as IT proxy:
+  it_categories: ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
+  n_samples:     500                               # number of tickets to use
+  text_column:   "instruction"                     # Bitext's ticket text column
+  label_column:  "category"                        # used for EDA only, not for training
+
+# ── Clustering ────────────────────────────────────────────────────────────────
+clustering:
+  embedding_model: "all-MiniLM-L6-v2"             # sentence-transformers model
+  umap:
+    n_components:    20                            # reduce to 20 dims before HDBSCAN
+    n_neighbors:     15
+    min_dist:        0.0
+    metric:          "cosine"
+    random_state:    42
+  hdbscan:
+    min_cluster_size: 10                           # minimum tickets per cluster
+    min_samples:      5
+    metric:           "euclidean"
+    cluster_selection_method: "eom"
+
+# ── Top-k selection ───────────────────────────────────────────────────────────
+top_k: 10                                          # tickets per cluster for LLM input
+
+# ── Frontier LLM (teacher) ────────────────────────────────────────────────────
+teacher_llm:
+  provider:      "anthropic"                       # "openai" | "anthropic"
+  # OpenAI:   "gpt-4o-mini"      (~$0.15/1M input tokens)
+  # Anthropic: "claude-haiku-4-5" (cheapest Haiku)
+  model:         "claude-haiku-4-5"
+  temperature:   0.3
+  max_tokens:    60                                # labels are 5-15 words
+  sleep_between_calls: 1.0                         # seconds between API calls
+  max_retries:   5
+  retry_wait_min: 2                                # seconds (exponential backoff)
+  retry_wait_max: 60
+  # API keys are read from environment variables, NOT stored here:
+  #   ANTHROPIC_API_KEY  (for Anthropic)
+  #   OPENAI_API_KEY     (for OpenAI)
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+prompts:
+  system: >
+    You are an expert at analyzing IT, HR, and customer experience support tickets.
+    Your task is to generate a concise, descriptive label for a cluster of support tickets.
+    The label should capture the dominant theme, be specific enough to distinguish this
+    cluster from others, and be 5-15 words long.
+    Return only the label — no explanation, no punctuation at the end, no quotes.
+
+  include_domain_in_prompt: false                  # set to true in Phase 2
+
+  P1: "Generate a concise label (5-15 words) for this cluster of support tickets.\n\n{tickets}"
+  P2: "What is the primary issue described in these support tickets? Answer in one short phrase.\n\n{tickets}"
+  P3: "Name this cluster as it would appear as a category in an IT support knowledge base.\n\n{tickets}"
+  P4: "Describe the common theme unifying these support tickets in 5-15 words.\n\n{tickets}"
+  P5: "Generate a label for this cluster that would help a chatbot route similar requests correctly.\n\n{tickets}"
+
+# ── Student SLM ───────────────────────────────────────────────────────────────
+student_slm:
+  # Recommended model per device_mode:
+  #   colab:       "microsoft/Phi-3.5-mini-instruct"       (3.8B)
+  #   local_mps:   "microsoft/Phi-3.5-mini-instruct"       (3.8B, fits M1 16GB)
+  #   local_cpu:   "HuggingFaceTB/SmolLM2-360M-Instruct"   (360M, smoke test)
+  #
+  # Other Phase 1 models (can swap in):
+  #   "HuggingFaceTB/SmolLM2-1.7B-Instruct"               (1.7B, in-between)
+  #   "HuggingFaceTB/SmolLM2-360M-Instruct"               (0.36B, fastest)
+
+  model_id:  "HuggingFaceTB/SmolLM2-360M-Instruct"
+  max_seq_length: 2048                             # max tokens per training example
+
+# ── LoRA / QLoRA configuration ───────────────────────────────────────────────
+lora:
+  r:               16        # rank — controls adapter expressiveness
+  lora_alpha:      16        # scaling factor (set equal to r as starting point)
+  lora_dropout:    0.05
+  bias:            "none"
+  target_modules:  "all-linear"
+  task_type:       "CAUSAL_LM"
+
+qlora:                       # used only in "colab" device_mode
+  load_in_4bit:        true
+  bnb_4bit_quant_type: "nf4"
+  use_double_quant:    true
+
+# ── Training (SFTConfig) ──────────────────────────────────────────────────────
+training:
+  num_train_epochs:              3
+  per_device_train_batch_size:   4
+  gradient_accumulation_steps:   4        # effective batch size = 16
+  learning_rate:                 2.0e-4
+  lr_scheduler_type:             "cosine"
+  warmup_ratio:                  0.05
+  bf16:                          true     # bfloat16 on Colab and M1 MPS
+  fp16:                          false
+  gradient_checkpointing:        true
+  logging_steps:                 10
+  eval_strategy:                 "epoch"
+  save_strategy:                 "epoch"
+  load_best_model_at_end:        true
+  metric_for_best_model:         "eval_loss"
+  output_dir:                    "{paths.models_out}/lora_adapter"
+
+# ── Train / Val / Test split ──────────────────────────────────────────────────
+split:
+  train:      0.70
+  val:        0.15
+  test:       0.15
+  # Split is performed at CLUSTER level (not ticket level) to prevent data leakage.
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+evaluation:
+  # ── Re-run evaluations on an existing trained model ───────────────────────
+  # Set to the run directory path to skip all training and run only evaluations.
+  # Example: "outputs/20260819_2347_SmolLM2-1.7B-Instruct_ep6"
+  # Leave null for a normal training + evaluation run.
+  existing_run_dir: null
+
+  # ── Cosine similarity (PRIMARY metric — always runs) ──────────────────────
+  embedding_model: "all-mpnet-base-v2"
+
+  # ── BERTScore (SECONDARY metric — OFF by default for local/Phase 1) ───────
+  run_bertscore: false
+  bertscore_model: "roberta-large"
+
+  # ── LLM-as-Judge ──────────────────────────────────────────────────────────
+  # judge_mode options:
+  #   "reference"      (default) — judge receives tickets + reference label + candidate label.
+  #                                Rates: Faithfulness, Specificity, Equivalence.
+  #                                Teacher tag is shortcut: 5/5/5 hardcoded, no API call.
+  #   "reference_free" — judge receives only tickets + candidate label (no reference).
+  #                       Rates: Faithfulness, Specificity, Coherence.
+  #                       Eliminates circular bias; useful for comparing all three models
+  #                       on the same intrinsic scale.
+  judge_mode: "reference"
+  judge_llm:
+    provider:    "anthropic"
+    model:       "claude-haiku-4-5"
+    n_samples:   50
+    temperature: 0.0
+
+  # ── Business evaluation ───────────────────────────────────────────────────
+  business:
+    measure_label_generation_latency: true
+    measure_finetuning_time:          true
+    measure_inference_latency:        true
+    n_inference_warmup_runs:          3
+
+# ── Inference demo ────────────────────────────────────────────────────────────
+# Used by: python main.py --phase 1 --config configs/phase1_config.yaml --mode demo
+# CLI flags (--adapter_dir, --input_file, --prompt_id, --demo_k) override these values.
+inference:
+  # Path to the LoRA adapter from a completed training run.
+  # Example: "outputs/20260819_2347_SmolLM2-1.7B-Instruct_ep6/models/lora_adapter"
+  adapter_dir: "outputs/20260819_2209_SmolLM2-360M-Instruct_ep8/models/lora_adapter"
+
+  # Path to a plain text file with one support ticket per line.
+  # Example: "demo_tickets.txt"
+  input_file: null
+
+  # Which prompt template to use for label generation (P1–P5).
+  prompt_id: "P1"
+
+  # Number of tickets to send to each model (null = use top_k from config).
+  demo_k: null
+
+# ── Colab-specific ────────────────────────────────────────────────────────────
+colab:
+  mount_drive:         true
+  drive_root_override: "/content/drive/MyDrive/slm-distillation"
+  cache_model_on_drive: true             # saves HF model cache to Drive

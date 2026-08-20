@@ -1,0 +1,7 @@
+VPN disconnects every 20-30 minutes and requires manual reconnection throughout the workday.
+Cannot connect to the corporate VPN from home network — getting a certificate validation error.
+VPN connects successfully but cannot reach internal SharePoint or intranet sites after connecting.
+Split tunneling stopped working after the GlobalProtect client update pushed last Tuesday.
+VPN authentication is timing out — MFA push notification never arrives on the Authenticator app.
+Certain office locations cannot connect to VPN at all since the network infrastructure upgrade.
+VPN performance degraded significantly — file transfers to the file server take 10x longer than before.

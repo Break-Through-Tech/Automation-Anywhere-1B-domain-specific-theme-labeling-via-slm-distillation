@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# requirements_colab.txt
+# CUDA-only additions for Google Colab GPU sessions.
+# Run AFTER requirements.txt:
+#   pip install -r requirements_colab.txt
+#
+# Do NOT install on M1/M2/M5 Mac — bitsandbytes requires CUDA.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 4-bit quantisation (QLoRA) ────────────────────────────────────────────────
+bitsandbytes>=0.43.3
+
+# ── Unsloth: 2x faster training, 60% less VRAM ───────────────────────────────
+# Supports Phi-3.5-Mini, SmolLM2, Llama, Qwen, Mistral, Gemma
+unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+
+# ── Flash attention (optional, speeds up attention on A100/H100) ──────────────
+# Uncomment only if Colab gives you an A100:
+# flash-attn>=2.6.0 --no-build-isolation
