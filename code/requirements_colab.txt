@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# requirements_colab.txt
+# CUDA-only additions for Google Colab GPU sessions.
+#
+# Install in this order on Colab (the session setup notebook does this):
+#   pip install -r requirements.txt         ← base packages (all platforms)
+#   pip install -r requirements_colab.txt   ← CUDA-only packages (Colab only)
+#
+# Do NOT install on M1/M2/M5 Mac — bitsandbytes requires NVIDIA CUDA.
+# Mac fine-tuning uses the local_mps device mode without these packages.
+#
+# Tested environment:
+#   Colab T4 GPU (16 GB VRAM)  |  Python 3.10/3.11  |  CUDA 12.x
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 4-bit NF4 quantisation (required for QLoRA) ───────────────────────────────
+# Enables loading 3.8B–9B parameter models in 4-bit precision.
+# Without this, models larger than ~4B will run out of memory on a 16 GB T4.
+bitsandbytes>=0.43.3
+
+# ── Unsloth: faster LoRA fine-tuning ─────────────────────────────────────────
+# Provides 2× faster training and ~60% less VRAM vs standard HuggingFace PEFT.
+# Supported models: SmolLM2 (360M, 1.7B), Phi-3.5-Mini (3.8B),
+#                   Llama-3.2-8B, Qwen2.5-7B, Mistral-7B, Gemma-2-9B.
+#
+# Installation note: we use PyPI (not GitHub) for stability.
+# The pipeline auto-detects Unsloth; if it's unavailable it falls back to
+# standard HuggingFace PEFT (functionally identical, ~2× slower).
+unsloth[colab-new]
+
+# ── Unsloth Zoo: utility functions required by newer Unsloth versions ─────────
+# Unsloth split some internals into this companion package.
+# Safe to install even if your Unsloth version doesn't require it.
+unsloth_zoo
+
+# ── Flash Attention 2 (optional — A100/H100 only, NOT compatible with T4) ─────
+# Speeds up attention. T4 GPUs do NOT support it — leave this commented out
+# unless Colab assigns you an A100 (rare on free tier).
+# flash-attn>=2.6.0 --no-build-isolation
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colab-specific config notes (not packages — read before running):
+#
+# BERTScore:
+#   The Python 3.14 + tokenizers OverflowError that disables BERTScore locally
+#   does NOT occur on Colab (Python 3.10/3.11). You can enable it on Colab:
+#     In configs/phase1_config.yaml → evaluation.run_bertscore: true
+#   Use bertscore_model: "roberta-large" (1.4 GB, cached on Drive after first use).
+#
+# Device mode:
+#   Always run with --device_mode colab (or set it in the config).
+#   This enables QLoRA via bitsandbytes and Unsloth when available.
+#
+# Model cache:
+#   Models download to Drive/hf_cache/ on first use (~2–10 min per model).
+#   All subsequent sessions load from Drive cache in ~30 seconds.
+# ─────────────────────────────────────────────────────────────────────────────
+
