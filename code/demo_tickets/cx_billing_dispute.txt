@@ -1,0 +1,8 @@
+Customer was charged twice for the same subscription renewal in the same billing cycle this month.
+Invoice shows the wrong amount — customer was quoted a 20% loyalty discount but was billed full price.
+Cannot download the monthly invoice from the customer portal — the PDF export button does nothing.
+Refund was requested two weeks ago and confirmed by support but still not reflected in the bank account.
+Auto-renewal was explicitly disabled in account settings but the annual subscription was charged anyway.
+Customer received a collections notice for an invoice they already paid three months ago with confirmation.
+Proration calculation appears wrong after mid-cycle plan downgrade — overcharged by approximately $45.
+Coupon code applied successfully at checkout but the discount was not reflected in the final charge.

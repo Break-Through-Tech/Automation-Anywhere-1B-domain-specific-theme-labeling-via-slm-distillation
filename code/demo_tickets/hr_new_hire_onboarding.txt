@@ -1,0 +1,8 @@
+New hire starting Monday has not received laptop, access badge, or system credentials as of Friday.
+Onboarding checklist shows all steps completed in Workday but employee still cannot log in to any systems.
+HR system not updated with new employee record — benefits enrollment deadline passed without portal access.
+New team member needs Slack, Zoom, Jira, and Confluence access provisioned before their start date tomorrow.
+Background check cleared three weeks ago but IT provisioning still pending for incoming engineering hire.
+New employee orientation cannot be completed because the learning management system account was never created.
+Offer letter accepted but employee ID has not been generated in the HR system after two weeks.
+New hire payroll setup blocked — direct deposit form submitted but not processed before first pay date.

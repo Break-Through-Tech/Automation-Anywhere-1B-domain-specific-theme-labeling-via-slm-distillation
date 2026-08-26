@@ -1,0 +1,5 @@
+User cannot reset password after v22 OS upgrade
+Error 0x80070032 when attempting credential reset on new laptop
+Password reset page times out after the Windows v22 migration
+Cannot access email after mandatory password change - v22 upgrade
+Getting locked out of system every 30 mins since upgrade to v22
