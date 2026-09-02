@@ -1,6 +1,6 @@
 """
-2026.8.16
-2026.8.22
+2026.9.1
+2026.9.2
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -66,8 +66,14 @@ except Exception:
 # the historical raw passthrough so this can never break trainer construction.
 try:
     from unsloth.models.rl_config_compat import filter_config_init_kwargs as _unsloth_filter_config_init_kwargs
+    # A cache file generated here can be imported by an older Unsloth whose filter
+    # predates `mirrored_from`, so drop the argument rather than raise TypeError.
+    if "mirrored_from" not in inspect.signature(_unsloth_filter_config_init_kwargs).parameters:
+        _unsloth_filter_config_init_kwargs_old = _unsloth_filter_config_init_kwargs
+        def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw):
+            return _unsloth_filter_config_init_kwargs_old(config_class, kwargs)
 except Exception:
-    def _unsloth_filter_config_init_kwargs(config_class, kwargs): return kwargs
+    def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw): return kwargs
 def prepare_for_training_mode(f):
     @functools.wraps(f)
     def wrapper(self, *args, **kwargs):
@@ -762,7 +768,7 @@ Parameters:
             reward_weights = reward_weights,
             dataset_num_proc = dataset_num_proc,
             gpu_memory_utilization = gpu_memory_utilization,**kwargs)
-        super().__init__(**_unsloth_filter_config_init_kwargs(NashMDConfig, _unsloth_config_arguments))
+        super().__init__(**_unsloth_filter_config_init_kwargs(NashMDConfig, _unsloth_config_arguments, mirrored_from = __class__))
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
         if unsloth_grpo_mini_batch is not None:
