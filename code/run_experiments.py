@@ -48,9 +48,13 @@ import pandas as pd
 import yaml
 
 # ── CONFIGURE THESE ─────────────────────────────────────────────────────────
+# These match the same variables your setup_repo() / commit_file() helpers use.
+# If you're running this from a cell that already ran setup_repo(), you can
+# just reuse REPO, CODE_DIR, BRANCH directly instead of re-typing them.
 
-BASE_CONFIG_PATH = "/content/project/configs/phase1_config_vd.yaml"  # YOUR OWN copy
-CODE_DIR = "/content/project"
+REPO = "/content/project"
+CODE_DIR = "/content/project/code"       # main.py and configs/ live here
+BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"  # YOUR OWN copy
 DRIVE_ROOT = "/content/drive/MyDrive/slm-distillation"
 DEVICE_MODE = "colab"
 
