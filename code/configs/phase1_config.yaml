@@ -9,7 +9,7 @@
 #   "colab"       — CUDA + QLoRA (bitsandbytes + Unsloth). Use on Colab T4.
 #   "local_mps"   — Apple MPS + LoRA bfloat16 (no quantisation). Use on M1/M5 Mac.
 #   "local_cpu"   — CPU + LoRA float32 (smoke test only, very slow). Use anywhere.
-device_mode: "local_mps"   # change to "colab" when running on Colab
+device_mode: "colab"   # change to "colab" when running on Colab
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 seed: 42
@@ -38,7 +38,7 @@ checkpoints:
 # For Colab: set drive_root to "/content/drive/MyDrive/slm-distillation"
 # For local:  set drive_root to an absolute path on your machine
 paths:
-  drive_root:          "."                         # override in Colab
+  drive_root:          "/content/drive/MyDrive/slm-distillation"                         # override in Colab
   data_raw:            "{drive_root}/data/raw"
   data_processed:      "{drive_root}/data/processed"
   checkpoints:         "{drive_root}/data/checkpoints"
