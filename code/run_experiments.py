@@ -40,6 +40,7 @@ burning extra Anthropic API budget on unnecessary re-labeling.
 """
 
 import copy
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -48,19 +49,12 @@ import pandas as pd
 import yaml
 
 # ── CONFIGURE THESE ─────────────────────────────────────────────────────────
-# These match the same variables your setup_repo() / commit_file() helpers use.
-# If you're running this from a cell that already ran setup_repo(), you can
-# just reuse REPO, CODE_DIR, BRANCH directly instead of re-typing them.
-
 REPO = "/content/project"
 CODE_DIR = "/content/project/code"       # main.py and configs/ live here
 BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"  # YOUR OWN copy
 DRIVE_ROOT = "/content/drive/MyDrive/slm-distillation"
 DEVICE_MODE = "colab"
 
-# Each dict below is ONE experiment. Only include the keys you want to
-# override from the base config — everything else stays as in your base file.
-# "label" becomes part of the experiment's identifying name in the results table.
 EXPERIMENTS = [
     {
         "label": "baseline",
@@ -99,7 +93,7 @@ EXPERIMENTS = [
     },
 ]
 
-# ── Implementation — you shouldn't need to edit below this line ────────────
+# ── Implementation ──────────────────────────────────────────────────────────
 
 
 def set_nested(cfg: dict, dotted_key: str, value) -> None:
@@ -114,8 +108,7 @@ def set_nested(cfg: dict, dotted_key: str, value) -> None:
 def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
     cfg = copy.deepcopy(base_cfg)
 
-    # These stay fixed across all experiments in this script:
-    # data prep already happened once, don't redo it or call the API again.
+    # These stay fixed across all experiments in this script
     cfg["pipeline"]["run_clustering"] = False
     cfg["pipeline"]["run_preprocessing"] = False
     cfg["pipeline"]["run_label_generation"] = False
@@ -126,12 +119,6 @@ def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
     cfg["pipeline"]["run_business_eval"] = True
     cfg["device_mode"] = DEVICE_MODE
 
-    # IMPORTANT: this script runs main.py as a subprocess, which cannot call
-    # drive.mount() (no access to the real Colab kernel). Your notebook must
-    # mount Drive itself BEFORE running this script. Telling main.py to skip
-    # its own mount attempt entirely is more reliable than depending on its
-    # os.path.exists() check, which can behave unexpectedly across subprocess
-    # boundaries.
     cfg.setdefault("colab", {})["mount_drive"] = False
 
     for key, value in overrides.items():
@@ -144,6 +131,8 @@ def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
 
 def find_latest_run_dir(outputs_dir: Path, since_ts: float) -> Path | None:
     """Find the most recently created run folder under outputs/."""
+    if not outputs_dir.exists():
+        return None
     candidates = [
         p for p in outputs_dir.iterdir()
         if p.is_dir() and p.stat().st_mtime >= since_ts
@@ -162,14 +151,25 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
     with open(config_path, "w") as f:
         yaml.dump(cfg, f)
 
+    # Prepare environment with CODE_DIR inside PYTHONPATH
+    env = os.environ.copy()
+    current_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{CODE_DIR}:{current_pythonpath}" if current_pythonpath else CODE_DIR
+
     start_time = time.time()
     result = subprocess.run(
         [
-            "python", f"{CODE_DIR}/main.py",
-            "--phase", "1",
-            "--config", config_path,
-            "--device_mode", DEVICE_MODE,
+            "python",
+            f"{CODE_DIR}/main.py",
+            "--phase",
+            "1",
+            "--config",
+            config_path,
+            "--device_mode",
+            DEVICE_MODE,
         ],
+        cwd=CODE_DIR,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -180,7 +180,6 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
         print(result.stderr[-2000:])  # last 2000 chars of error output
         return {"label": label, "status": "failed", "elapsed_sec": elapsed}
 
-    # locate the run folder this experiment just created
     outputs_dir = Path(f"{DRIVE_ROOT}/outputs")
     run_dir = find_latest_run_dir(outputs_dir, start_time)
     if run_dir is None:
@@ -223,10 +222,6 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
 
 
 def main():
-    # Drive must already be mounted in the notebook kernel BEFORE running this
-    # script — drive.mount() cannot work from inside a subprocess, which is
-    # how this script calls main.py. Fail fast with a clear message instead
-    # of silently failing on every single experiment.
     drive_root = Path(DRIVE_ROOT)
     if not drive_root.exists():
         raise RuntimeError(
@@ -236,7 +231,7 @@ def main():
             "    drive.mount('/content/drive', force_remount=True)\n\n"
             "Then re-run this script."
         )
-    # sanity check it's a real, working mount, not a stale/empty path
+
     try:
         list(drive_root.iterdir())
     except Exception as e:
@@ -244,6 +239,13 @@ def main():
             f"Drive path exists but isn't readable ({e}). Try re-mounting "
             "with force_remount=True in your notebook, then re-run this script."
         )
+
+    # Ensure phase1 directory packages contain __init__.py files
+    for pkg_dir in [Path(CODE_DIR) / "phase1", Path(CODE_DIR) / "phase1" / "data"]:
+        if pkg_dir.exists():
+            init_file = pkg_dir / "__init__.py"
+            if not init_file.exists():
+                init_file.touch()
 
     with open(BASE_CONFIG_PATH) as f:
         base_cfg = yaml.safe_load(f)
