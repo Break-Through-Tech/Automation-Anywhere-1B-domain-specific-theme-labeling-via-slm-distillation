@@ -126,6 +126,14 @@ def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
     cfg["pipeline"]["run_business_eval"] = True
     cfg["device_mode"] = DEVICE_MODE
 
+    # IMPORTANT: this script runs main.py as a subprocess, which cannot call
+    # drive.mount() (no access to the real Colab kernel). Your notebook must
+    # mount Drive itself BEFORE running this script. Telling main.py to skip
+    # its own mount attempt entirely is more reliable than depending on its
+    # os.path.exists() check, which can behave unexpectedly across subprocess
+    # boundaries.
+    cfg.setdefault("colab", {})["mount_drive"] = False
+
     for key, value in overrides.items():
         if key == "label":
             continue
@@ -219,13 +227,22 @@ def main():
     # script — drive.mount() cannot work from inside a subprocess, which is
     # how this script calls main.py. Fail fast with a clear message instead
     # of silently failing on every single experiment.
-    if not Path("/content/drive/MyDrive").exists():
+    drive_root = Path(DRIVE_ROOT)
+    if not drive_root.exists():
         raise RuntimeError(
-            "Google Drive is not mounted. Run this in a notebook cell FIRST "
-            "(not through this script):\n\n"
+            f"Google Drive is not mounted (or {DRIVE_ROOT} doesn't exist yet).\n"
+            "Run this in a notebook cell FIRST — not through this script:\n\n"
             "    from google.colab import drive\n"
-            "    drive.mount('/content/drive')\n\n"
+            "    drive.mount('/content/drive', force_remount=True)\n\n"
             "Then re-run this script."
+        )
+    # sanity check it's a real, working mount, not a stale/empty path
+    try:
+        list(drive_root.iterdir())
+    except Exception as e:
+        raise RuntimeError(
+            f"Drive path exists but isn't readable ({e}). Try re-mounting "
+            "with force_remount=True in your notebook, then re-run this script."
         )
 
     with open(BASE_CONFIG_PATH) as f:
