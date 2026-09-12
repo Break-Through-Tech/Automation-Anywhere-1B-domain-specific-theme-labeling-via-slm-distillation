@@ -215,6 +215,19 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
 
 
 def main():
+    # Drive must already be mounted in the notebook kernel BEFORE running this
+    # script — drive.mount() cannot work from inside a subprocess, which is
+    # how this script calls main.py. Fail fast with a clear message instead
+    # of silently failing on every single experiment.
+    if not Path("/content/drive/MyDrive").exists():
+        raise RuntimeError(
+            "Google Drive is not mounted. Run this in a notebook cell FIRST "
+            "(not through this script):\n\n"
+            "    from google.colab import drive\n"
+            "    drive.mount('/content/drive')\n\n"
+            "Then re-run this script."
+        )
+
     with open(BASE_CONFIG_PATH) as f:
         base_cfg = yaml.safe_load(f)
 
