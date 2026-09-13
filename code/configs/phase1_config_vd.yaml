@@ -14,10 +14,10 @@ seed: 42
 pipeline:
   run_clustering:        false   # Skipped: already completed
   run_preprocessing:     false   # Skipped: bitext_grouped.csv exists
-  run_label_generation:  true    # MUST RUN: generates labels for student training
-  run_finetuning:        true    # QLoRA fine-tune the student SLM
-  run_baseline_eval:     true    # Evaluate vanilla (pre-distillation) SLM
-  run_finetuned_eval:    true    # Evaluate fine-tuned SLM
+  run_label_generation:  false    # MUST RUN: generates labels for student training
+  run_finetuning:        false    # QLoRA fine-tune the student SLM
+  run_baseline_eval:     false    # Evaluate vanilla (pre-distillation) SLM
+  run_finetuned_eval:    false    # Evaluate fine-tuned SLM
   run_llm_judge:         true    # LLM-as-judge evaluation (Claude Haiku)
   run_business_eval:     true    # Latency, cost, throughput metrics
 
@@ -147,7 +147,7 @@ split:
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
 evaluation:
-  existing_run_dir: null
+  existing_run_dir: "/content/drive/MyDrive/slm-distillation/outputs/20260913_0409_SmolLM2-360M-Instruct_ep3"
   embedding_model:  "all-mpnet-base-v2"
   run_bertscore:    false
   bertscore_model:  "roberta-large"
@@ -157,7 +157,7 @@ evaluation:
     provider:    "anthropic"
     model:       "claude-haiku-4-5"
     n_samples:   50
-    temperature: 0.0
+    #temperature: 0.0
 
   business:
     measure_label_generation_latency: true
