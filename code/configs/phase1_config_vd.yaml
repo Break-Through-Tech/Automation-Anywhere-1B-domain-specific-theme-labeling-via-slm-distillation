@@ -157,7 +157,7 @@ evaluation:
     provider:    "anthropic"
     model:       "claude-haiku-4-5"
     n_samples:   50
-    #temperature: 0.0
+    temperature: 0.0
 
   business:
     measure_label_generation_latency: true
