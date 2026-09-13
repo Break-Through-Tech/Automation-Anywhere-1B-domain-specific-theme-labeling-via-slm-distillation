@@ -55,8 +55,6 @@ EXPERIMENTS = [
         "lora.r": 16,
         "lora.lora_alpha": 16,
     },
-
-    boundary_experiments = [
     {
         "label": "lr_higher_8e-4",
         "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
@@ -72,8 +70,7 @@ EXPERIMENTS = [
         "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
-    }
-]
+    },
 
     {
         "label": "epochs_5",
