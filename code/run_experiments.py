@@ -105,6 +105,22 @@ EXPERIMENTS = [
         "lora.r": 16,
         "lora.lora_alpha": 16,
     },
+    {
+        "label": "model_1.7B_lr_8e-4",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+        "training.learning_rate": 8.0e-4,
+        "training.num_train_epochs": 3,
+        "lora.r": 16,
+        "lora.lora_alpha": 16,
+    },
+    {
+        "label": "model_1.7B_lr_1e-3",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+        "training.learning_rate": 1.0e-3,
+        "training.num_train_epochs": 3,
+        "lora.r": 16,
+        "lora.lora_alpha": 16,
+    },
 ]
 
 # ── 3. HELPERS ────────────────────────────────────────────────────────────────
