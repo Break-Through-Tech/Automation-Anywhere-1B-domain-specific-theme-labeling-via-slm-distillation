@@ -323,16 +323,16 @@ def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
         reraise=True,
     )
     def _call():
-        resp = client.messages.create(
-            model=judge_cfg["model"],
-            max_tokens=200,
-            temperature=judge_cfg["temperature"],
-            messages=messages,
-        )
+        call_kwargs = {
+            "model": judge_cfg["model"],
+            "max_tokens": judge_cfg.get("max_tokens", 256),
+            "messages": messages,
+        }
+        try:
+            resp = client.messages.create(**call_kwargs, temperature=judge_cfg.get("temperature", 0.0))
+        except (TypeError, Exception):
+            resp = client.messages.create(**call_kwargs)
         return resp.content[0].text
-
-    return _call()
-
 
 def _openai_call(messages: list[dict], judge_cfg: dict) -> str:
     import openai
