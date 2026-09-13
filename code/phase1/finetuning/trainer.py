@@ -240,7 +240,7 @@ def generate_label(
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=60,
+            max_new_tokens=25, # original 60
             do_sample=False,         # greedy decoding for reproducibility
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
