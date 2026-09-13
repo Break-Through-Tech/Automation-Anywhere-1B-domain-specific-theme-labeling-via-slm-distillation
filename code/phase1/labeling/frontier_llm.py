@@ -184,7 +184,6 @@ def _call_anthropic(messages: list[dict], llm_cfg: dict) -> str:
         response = client.messages.create(
             model=llm_cfg["model"],
             max_tokens=llm_cfg["max_tokens"],
-            temperature=llm_cfg["temperature"],
             system=system_msg,
             messages=user_msgs,
         )
