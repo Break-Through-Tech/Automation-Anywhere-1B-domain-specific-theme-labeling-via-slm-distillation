@@ -4,7 +4,7 @@ run_experiments.py — Automated fine-tuning experiment runner and baseline comp
 WHAT THIS DOES:
 1. Loads your base YAML config.
 2. Runs a series of controlled hyperparameter experiments using main.py.
-3. Extracts metrics (Cosine Sim, ROUGE-L, LLM Judge composite scores).
+3. Extracts metrics defensively (Cosine Sim, ROUGE-L, LLM Judge composite scores).
 4. Compares each run against the baseline model (evaluating deltas: Δ Cosine, Δ ROUGE).
 5. Exports results to experiment_comparison.csv.
 """
@@ -22,17 +22,17 @@ import yaml
 # ── 1. CONFIGURATION & PATHS ──────────────────────────────────────────────────
 REPO = "/content/project"
 CODE_DIR = "/content/project/code"
-BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"  # Path to base config
+BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"
 DRIVE_ROOT = "/content/drive/MyDrive/slm-distillation"
 DEVICE_MODE = "colab"  # "colab", "local_mps", or "local_cpu"
 
+# Standard target modules for LLaMA / SmolLM architectures
+DEFAULT_TARGET_MODULES = [
+    "q_proj", "k_proj", "v_proj", "o_proj",
+    "gate_proj", "up_proj", "down_proj"
+]
+
 # ── 2. HYPERPARAMETER EXPERIMENT GRID ─────────────────────────────────────────
-# Structured to follow best-practice ablation:
-# 1. Base run
-# 2. Learning rate sensitivity (P0)
-# 3. Epoch convergence/overfitting (P0)
-# 4. LoRA rank/capacity scaling (P1)
-# 5. Model scaling comparison (P1 - testing SmolLM2-1.7B vs 360M)
 EXPERIMENTS = [
     # Baseline configuration
     {
@@ -117,8 +117,16 @@ def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
     cfg["pipeline"]["run_business_eval"] = True
     cfg["device_mode"] = DEVICE_MODE
 
+    # Clear eval-only locks so new models train and evaluate cleanly
+    cfg.setdefault("evaluation", {})["existing_run_dir"] = None
+
     # Prevent recursive drive.mount() calls in subprocess
     cfg.setdefault("colab", {})["mount_drive"] = False
+
+    # Guard against string-based target_modules crashing PEFT
+    lora_cfg = cfg.setdefault("lora", {})
+    if isinstance(lora_cfg.get("target_modules"), str):
+        lora_cfg["target_modules"] = DEFAULT_TARGET_MODULES
 
     for key, value in overrides.items():
         if key == "label":
@@ -139,6 +147,29 @@ def find_latest_run_dir(outputs_dir: Path, since_ts: float) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
 
 
+def get_metric_val(df: pd.DataFrame, model_name: str, *candidate_cols, default=None):
+    """Safely extracts a metric across different schema variants and prevents KeyError."""
+    if df.empty:
+        return default
+
+    sub = df[df["model"] == model_name] if "model" in df.columns else df
+    if "split" in sub.columns and (sub["split"] == "test").any():
+        sub = sub[sub["split"] == "test"]
+
+    if sub.empty:
+        return default
+
+    for col in candidate_cols:
+        if col in sub.columns:
+            val = sub[col].iloc[0]
+            try:
+                return round(float(val), 4) if pd.notna(val) else default
+            except (ValueError, TypeError):
+                return default
+
+    return default
+
+
 def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
     """Runs a single experiment subprocess and collects metric deltas."""
     label = exp["label"]
@@ -147,11 +178,10 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
     cfg = build_experiment_config(base_cfg, exp)
     config_path = f"{CODE_DIR}/configs/exp_{label}.yaml"
     Path(f"{CODE_DIR}/configs").mkdir(parents=True, exist_ok=True)
-    
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f)
 
-    # Set up PYTHONPATH so module imports (e.g., phase1.data) resolve
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, default_flow_style=False)
+
     env = os.environ.copy()
     current_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{CODE_DIR}:{current_pp}" if current_pp else CODE_DIR
@@ -164,7 +194,7 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
             "--phase", "1",
             "--config", config_path,
             "--device_mode", DEVICE_MODE,
-            "--no_checkpoints",  # Force training from scratch for clean trial
+            "--no_checkpoints",
         ],
         cwd=CODE_DIR,
         env=env,
@@ -175,20 +205,18 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
 
     if result.returncode != 0:
         print(f"[ERROR] Experiment '{label}' failed with returncode {result.returncode}")
-        print(result.stderr[-2500:])  # Print trailing traceback
-        return {"label": label, "status": "failed", "elapsed_sec": round(elapsed, 1)}
+        print(result.stderr[-2500:])
+        return {"label": label, "status": "failed", "elapsed_min": round(elapsed / 60, 2)}
 
-    # Scan for generated run output directory
     outputs_dir = Path(f"{DRIVE_ROOT}/outputs")
     run_dir = find_latest_run_dir(outputs_dir, start_time)
     if run_dir is None:
         print(f"[WARNING] Could not identify output run folder for '{label}'")
-        return {"label": label, "status": "missing_output", "elapsed_sec": round(elapsed, 1)}
+        return {"label": label, "status": "missing_output", "elapsed_min": round(elapsed / 60, 2)}
 
     metrics_path = run_dir / "evaluation" / "metrics_summary.csv"
     judge_path = run_dir / "evaluation" / "judge_summary.csv"
 
-    # Base result row
     row = {
         "label": label,
         "status": "success",
@@ -199,35 +227,25 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
         "lora_r": exp.get("lora.r", base_cfg.get("lora", {}).get("r")),
     }
 
-    # Extract test split performance metrics & calculate baseline lift
+    # ── Non-LLM Metrics ───────────────────────────────────────────────────────
     if metrics_path.exists():
         metrics_df = pd.read_csv(metrics_path)
-        test_rows = metrics_df[metrics_df["split"] == "test"]
+        row["base_cosine_sim"] = get_metric_val(metrics_df, "baseline", "cosine_sim_same", "cosine_sim")
+        row["base_rouge_l"]    = get_metric_val(metrics_df, "baseline", "rouge_l_same", "rouge_l")
+        row["ft_cosine_sim"]   = get_metric_val(metrics_df, "finetuned", "cosine_sim_same", "cosine_sim")
+        row["ft_rouge_l"]      = get_metric_val(metrics_df, "finetuned", "rouge_l_same", "rouge_l")
 
-        base_row = test_rows[test_rows["model"] == "baseline"]
-        ft_row = test_rows[test_rows["model"] == "finetuned"]
-
-        if not base_row.empty:
-            row["base_cosine_sim"] = round(base_row["cosine_sim_same"].iloc[0], 4)
-            row["base_rouge_l"] = round(base_row["rouge_l_same"].iloc[0], 4)
-
-        if not ft_row.empty:
-            row["ft_cosine_sim"] = round(ft_row["cosine_sim_same"].iloc[0], 4)
-            row["ft_rouge_l"] = round(ft_row["rouge_l_same"].iloc[0], 4)
-
-        # Baseline comparative uplift
-        if not base_row.empty and not ft_row.empty:
+        if row.get("ft_cosine_sim") is not None and row.get("base_cosine_sim") is not None:
             row["Δ_cosine_sim"] = round(row["ft_cosine_sim"] - row["base_cosine_sim"], 4)
+        if row.get("ft_rouge_l") is not None and row.get("base_rouge_l") is not None:
             row["Δ_rouge_l"] = round(row["ft_rouge_l"] - row["base_rouge_l"], 4)
 
-    # Extract LLM-as-a-judge evaluations
+    # ── LLM-as-a-Judge Metrics ────────────────────────────────────────────────
     if judge_path.exists():
         judge_df = pd.read_csv(judge_path)
-        test_judge = judge_df[(judge_df["split"] == "test") & (judge_df["model"] == "finetuned")]
-        if not test_judge.empty:
-            row["judge_composite"] = round(test_judge["composite"].iloc[0], 2)
-            row["judge_faithfulness"] = round(test_judge["faithfulness"].iloc[0], 2)
-            row["judge_specificity"] = round(test_judge["specificity"].iloc[0], 2)
+        row["judge_composite"]    = get_metric_val(judge_df, "finetuned", "composite", "composite_score")
+        row["judge_faithfulness"] = get_metric_val(judge_df, "finetuned", "faithfulness")
+        row["judge_specificity"]  = get_metric_val(judge_df, "finetuned", "specificity")
 
     print(f"[COMPLETE] '{label}' finished in {row['elapsed_min']} min")
     return row
@@ -243,7 +261,6 @@ def main():
             "drive.mount('/content/drive', force_remount=True)"
         )
 
-    # Pre-flight package check to prevent ModuleNotFoundError
     for subpath in ["phase1", "phase1/data"]:
         init_file = Path(CODE_DIR) / subpath / "__init__.py"
         if init_file.parent.exists() and not init_file.exists():
@@ -268,9 +285,8 @@ def main():
     display_cols = [
         "label", "model", "lr", "epochs", "lora_r", 
         "base_cosine_sim", "ft_cosine_sim", "Δ_cosine_sim",
-        "judge_composite", "status"
+        "judge_composite", "elapsed_min", "status"
     ]
-    # Filter to existing columns in case of experiment failure
     cols = [c for c in display_cols if c in results_df.columns]
     print(results_df[cols].to_string(index=False))
     print(f"\nFull table with all metrics saved to: {out_path}")
