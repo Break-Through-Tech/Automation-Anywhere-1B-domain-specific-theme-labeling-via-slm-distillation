@@ -220,6 +220,6 @@ inference:
 
 # ── Colab-specific ────────────────────────────────────────────────────────────
 colab:
-  mount_drive:         true
+  mount_drive:         false
   drive_root_override: "/content/drive/MyDrive/slm-distillation"
   cache_model_on_drive: true             # saves HF model cache to Drive
