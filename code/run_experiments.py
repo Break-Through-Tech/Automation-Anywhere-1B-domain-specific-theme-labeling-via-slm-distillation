@@ -1,124 +1,115 @@
 """
-run_experiments.py — Automated fine-tuning experiment runner for Phase 1.
+run_experiments.py — Automated fine-tuning experiment runner and baseline comparison.
 
-WHAT THIS DOES
----------------
-Instead of manually editing phase1_config.yaml and re-running main.py for
-every parameter combination you want to test, this script:
-
-  1. Takes a BASE config (your own copy, e.g. phase1_config_vd.yaml)
-  2. Takes a GRID of parameter combinations you want to test
-  3. For each combination:
-       - copies the base config
-       - overrides just the parameters you're testing
-       - runs main.py with that config
-       - reads the resulting metrics_summary.csv and judge_summary.csv
-  4. Collects everything into ONE comparison table you can read/plot/share
-
-WHY THIS EXISTS
-----------------
-Manually running 6-8 experiments one at a time is slow and error-prone
-(easy to forget which config produced which result). This script makes
-each experiment reproducible and comparable, and produces the evidence
-table you'll want for Phase 3 (Analysis, Findings and Discussion).
-
-HOW TO USE
------------
-1. Set BASE_CONFIG_PATH below to YOUR OWN config copy (never the shared one).
-2. Edit the EXPERIMENTS list at the bottom to define what you want to test.
-3. Run this script from a Colab cell:
-       !python run_experiments.py
-4. When done, check experiment_results.csv for the full comparison table.
-
-COST/TIME NOTE
-----------------
-Each experiment with run_finetuning=True re-trains the model from scratch.
-Clustering/preprocessing/label_generation are set to False in the template
-below since you should only need to do those once (they don't change based
-on training hyperparameters). This keeps each experiment fast and avoids
-burning extra Anthropic API budget on unnecessary re-labeling.
+WHAT THIS DOES:
+1. Loads your base YAML config.
+2. Runs a series of controlled hyperparameter experiments using main.py.
+3. Extracts metrics (Cosine Sim, ROUGE-L, LLM Judge composite scores).
+4. Compares each run against the baseline model (evaluating deltas: Δ Cosine, Δ ROUGE).
+5. Exports results to experiment_comparison.csv.
 """
 
 import copy
+import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pandas as pd
 import yaml
 
-# ── CONFIGURE THESE ─────────────────────────────────────────────────────────
-# These match the same variables your setup_repo() / commit_file() helpers use.
-# If you're running this from a cell that already ran setup_repo(), you can
-# just reuse REPO, CODE_DIR, BRANCH directly instead of re-typing them.
-
+# ── 1. CONFIGURATION & PATHS ──────────────────────────────────────────────────
 REPO = "/content/project"
-CODE_DIR = "/content/project/code"       # main.py and configs/ live here
-BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"  # YOUR OWN copy
+CODE_DIR = "/content/project/code"
+BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config.yaml"  # Path to base config
 DRIVE_ROOT = "/content/drive/MyDrive/slm-distillation"
-DEVICE_MODE = "colab"
+DEVICE_MODE = "colab"  # "colab", "local_mps", or "local_cpu"
 
-# Each dict below is ONE experiment. Only include the keys you want to
-# override from the base config — everything else stays as in your base file.
-# "label" becomes part of the experiment's identifying name in the results table.
+# ── 2. HYPERPARAMETER EXPERIMENT GRID ─────────────────────────────────────────
+# Structured to follow best-practice ablation:
+# 1. Base run
+# 2. Learning rate sensitivity (P0)
+# 3. Epoch convergence/overfitting (P0)
+# 4. LoRA rank/capacity scaling (P1)
+# 5. Model scaling comparison (P1 - testing SmolLM2-1.7B vs 360M)
 EXPERIMENTS = [
+    # Baseline configuration
     {
-        "label": "baseline",
+        "label": "baseline_default",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
+        "training.learning_rate": 2.0e-4,
         "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
-        "training.learning_rate": 2.0e-4,
     },
+    # Learning Rate Ablations
     {
-        "label": "more_epochs",
-        "training.num_train_epochs": 6,
+        "label": "lr_low_5e-5",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
+        "training.learning_rate": 5.0e-5,
+        "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
-        "training.learning_rate": 2.0e-4,
     },
     {
-        "label": "higher_lora_rank",
+        "label": "lr_high_5e-4",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
+        "training.learning_rate": 5.0e-4,
+        "training.num_train_epochs": 3,
+        "lora.r": 16,
+        "lora.lora_alpha": 16,
+    },
+    # Epoch Sweep (Testing memorization / convergence)
+    {
+        "label": "epochs_5",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
+        "training.learning_rate": 2.0e-4,
+        "training.num_train_epochs": 5,
+        "lora.r": 16,
+        "lora.lora_alpha": 16,
+    },
+    # LoRA Capacity (Rank + Alpha scaling)
+    {
+        "label": "lora_r32_a32",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
+        "training.learning_rate": 2.0e-4,
         "training.num_train_epochs": 3,
         "lora.r": 32,
         "lora.lora_alpha": 32,
+    },
+    # Model Capacity Comparison
+    {
+        "label": "model_smollm_1.7B",
+        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
         "training.learning_rate": 2.0e-4,
-    },
-    {
-        "label": "higher_learning_rate",
         "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
-        "training.learning_rate": 5.0e-4,
-    },
-    {
-        "label": "lower_learning_rate",
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-        "training.learning_rate": 5.0e-5,
     },
 ]
 
-# ── Implementation — you shouldn't need to edit below this line ────────────
 
-
+# ── 3. HELPER FUNCTIONS ───────────────────────────────────────────────────────
 def set_nested(cfg: dict, dotted_key: str, value) -> None:
     """Set cfg['a']['b'] = value from the string 'a.b'."""
     keys = dotted_key.split(".")
     node = cfg
     for k in keys[:-1]:
-        node = node[k]
+        node = node.setdefault(k, {})
     node[keys[-1]] = value
 
 
 def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
+    """Clones base config and prepares pipeline flags for training & evaluation."""
     cfg = copy.deepcopy(base_cfg)
 
-    # These stay fixed across all experiments in this script:
-    # data prep already happened once, don't redo it or call the API again.
+    # Freeze pre-training stages (reuse generated labels & clusters)
     cfg["pipeline"]["run_clustering"] = False
     cfg["pipeline"]["run_preprocessing"] = False
     cfg["pipeline"]["run_label_generation"] = False
+
+    # Execute training and downstream evaluations
     cfg["pipeline"]["run_finetuning"] = True
     cfg["pipeline"]["run_baseline_eval"] = True
     cfg["pipeline"]["run_finetuned_eval"] = True
@@ -126,17 +117,8 @@ def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
     cfg["pipeline"]["run_business_eval"] = True
     cfg["device_mode"] = DEVICE_MODE
 
-    # IMPORTANT: this script runs main.py as a subprocess, which cannot call
-    # drive.mount() (no access to the real Colab kernel). Your notebook must
-    # mount Drive itself BEFORE running this script.
-    #
-    # Setting colab.mount_drive=False stops main.py from attempting its own
-    # mount, BUT that same flag also normally triggers the drive_root path
-    # override in main.py's resolve_paths(). Since we're disabling it, we
-    # set paths.drive_root directly here instead, so file paths still
-    # resolve correctly to Drive.
+    # Prevent recursive drive.mount() calls in subprocess
     cfg.setdefault("colab", {})["mount_drive"] = False
-    cfg.setdefault("paths", {})["drive_root"] = DRIVE_ROOT
 
     for key, value in overrides.items():
         if key == "label":
@@ -147,109 +129,130 @@ def build_experiment_config(base_cfg: dict, overrides: dict) -> dict:
 
 
 def find_latest_run_dir(outputs_dir: Path, since_ts: float) -> Path | None:
-    """Find the most recently created run folder under outputs/."""
+    """Locate the newly created output folder under outputs/."""
+    if not outputs_dir.exists():
+        return None
     candidates = [
         p for p in outputs_dir.iterdir()
         if p.is_dir() and p.stat().st_mtime >= since_ts
     ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
 
 
 def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
+    """Runs a single experiment subprocess and collects metric deltas."""
     label = exp["label"]
-    print(f"\n{'='*70}\nRunning experiment: {label}\n{'='*70}")
+    print(f"\n{'='*75}\n[STARTING EXPERIMENT]: {label}\n{'='*75}")
 
     cfg = build_experiment_config(base_cfg, exp)
     config_path = f"{CODE_DIR}/configs/exp_{label}.yaml"
-    with open(config_path, "w") as f:
+    Path(f"{CODE_DIR}/configs").mkdir(parents=True, exist_ok=True)
+    
+    with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f)
+
+    # Set up PYTHONPATH so module imports (e.g., phase1.data) resolve
+    env = os.environ.copy()
+    current_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{CODE_DIR}:{current_pp}" if current_pp else CODE_DIR
 
     start_time = time.time()
     result = subprocess.run(
         [
-            "python", f"{CODE_DIR}/main.py",
+            sys.executable,
+            f"{CODE_DIR}/main.py",
             "--phase", "1",
             "--config", config_path,
             "--device_mode", DEVICE_MODE,
+            "--no_checkpoints",  # Force training from scratch for clean trial
         ],
+        cwd=CODE_DIR,
+        env=env,
         capture_output=True,
         text=True,
     )
     elapsed = time.time() - start_time
 
     if result.returncode != 0:
-        print(f"[ERROR] Experiment '{label}' failed:")
-        print(result.stderr[-2000:])  # last 2000 chars of error output
-        return {"label": label, "status": "failed", "elapsed_sec": elapsed}
+        print(f"[ERROR] Experiment '{label}' failed with returncode {result.returncode}")
+        print(result.stderr[-2500:])  # Print trailing traceback
+        return {"label": label, "status": "failed", "elapsed_sec": round(elapsed, 1)}
 
-    # locate the run folder this experiment just created
+    # Scan for generated run output directory
     outputs_dir = Path(f"{DRIVE_ROOT}/outputs")
     run_dir = find_latest_run_dir(outputs_dir, start_time)
     if run_dir is None:
-        print(f"[WARNING] Could not locate output folder for '{label}'")
-        return {"label": label, "status": "no_output_found", "elapsed_sec": elapsed}
+        print(f"[WARNING] Could not identify output run folder for '{label}'")
+        return {"label": label, "status": "missing_output", "elapsed_sec": round(elapsed, 1)}
 
     metrics_path = run_dir / "evaluation" / "metrics_summary.csv"
     judge_path = run_dir / "evaluation" / "judge_summary.csv"
 
+    # Base result row
     row = {
         "label": label,
         "status": "success",
-        "elapsed_sec": round(elapsed, 1),
-        "run_dir": str(run_dir),
-        **{k: v for k, v in exp.items() if k != "label"},
+        "elapsed_min": round(elapsed / 60, 2),
+        "model": exp.get("student_slm.model_id", base_cfg.get("student_slm", {}).get("model_id")),
+        "lr": exp.get("training.learning_rate", base_cfg.get("training", {}).get("learning_rate")),
+        "epochs": exp.get("training.num_train_epochs", base_cfg.get("training", {}).get("num_train_epochs")),
+        "lora_r": exp.get("lora.r", base_cfg.get("lora", {}).get("r")),
     }
 
+    # Extract test split performance metrics & calculate baseline lift
     if metrics_path.exists():
         metrics_df = pd.read_csv(metrics_path)
-        test_finetuned = metrics_df[
-            (metrics_df["split"] == "test") & (metrics_df["model"] == "finetuned")
-        ]
-        if len(test_finetuned) > 0:
-            row["cosine_sim_same"] = test_finetuned["cosine_sim_same"].iloc[0]
-            row["rouge_l_same"] = test_finetuned["rouge_l_same"].iloc[0]
+        test_rows = metrics_df[metrics_df["split"] == "test"]
 
+        base_row = test_rows[test_rows["model"] == "baseline"]
+        ft_row = test_rows[test_rows["model"] == "finetuned"]
+
+        if not base_row.empty:
+            row["base_cosine_sim"] = round(base_row["cosine_sim_same"].iloc[0], 4)
+            row["base_rouge_l"] = round(base_row["rouge_l_same"].iloc[0], 4)
+
+        if not ft_row.empty:
+            row["ft_cosine_sim"] = round(ft_row["cosine_sim_same"].iloc[0], 4)
+            row["ft_rouge_l"] = round(ft_row["rouge_l_same"].iloc[0], 4)
+
+        # Baseline comparative uplift
+        if not base_row.empty and not ft_row.empty:
+            row["Δ_cosine_sim"] = round(row["ft_cosine_sim"] - row["base_cosine_sim"], 4)
+            row["Δ_rouge_l"] = round(row["ft_rouge_l"] - row["base_rouge_l"], 4)
+
+    # Extract LLM-as-a-judge evaluations
     if judge_path.exists():
         judge_df = pd.read_csv(judge_path)
-        test_finetuned = judge_df[
-            (judge_df["split"] == "test") & (judge_df["model"] == "finetuned")
-        ]
-        if len(test_finetuned) > 0:
-            row["judge_faithfulness"] = test_finetuned["faithfulness"].iloc[0]
-            row["judge_specificity"] = test_finetuned["specificity"].iloc[0]
-            row["judge_equivalence"] = test_finetuned["equivalence"].iloc[0]
-            row["judge_composite"] = test_finetuned["composite"].iloc[0]
+        test_judge = judge_df[(judge_df["split"] == "test") & (judge_df["model"] == "finetuned")]
+        if not test_judge.empty:
+            row["judge_composite"] = round(test_judge["composite"].iloc[0], 2)
+            row["judge_faithfulness"] = round(test_judge["faithfulness"].iloc[0], 2)
+            row["judge_specificity"] = round(test_judge["specificity"].iloc[0], 2)
 
-    print(f"[DONE] '{label}' finished in {elapsed/60:.1f} min")
+    print(f"[COMPLETE] '{label}' finished in {row['elapsed_min']} min")
     return row
 
 
+# ── 4. EXECUTION LOOP ─────────────────────────────────────────────────────────
 def main():
-    # Drive must already be mounted in the notebook kernel BEFORE running this
-    # script — drive.mount() cannot work from inside a subprocess, which is
-    # how this script calls main.py. Fail fast with a clear message instead
-    # of silently failing on every single experiment.
     drive_root = Path(DRIVE_ROOT)
     if not drive_root.exists():
         raise RuntimeError(
-            f"Google Drive is not mounted (or {DRIVE_ROOT} doesn't exist yet).\n"
-            "Run this in a notebook cell FIRST — not through this script:\n\n"
-            "    from google.colab import drive\n"
-            "    drive.mount('/content/drive', force_remount=True)\n\n"
-            "Then re-run this script."
-        )
-    # sanity check it's a real, working mount, not a stale/empty path
-    try:
-        list(drive_root.iterdir())
-    except Exception as e:
-        raise RuntimeError(
-            f"Drive path exists but isn't readable ({e}). Try re-mounting "
-            "with force_remount=True in your notebook, then re-run this script."
+            f"Directory {DRIVE_ROOT} not found. Mount drive first:\n"
+            "from google.colab import drive\n"
+            "drive.mount('/content/drive', force_remount=True)"
         )
 
-    with open(BASE_CONFIG_PATH) as f:
+    # Pre-flight package check to prevent ModuleNotFoundError
+    for subpath in ["phase1", "phase1/data"]:
+        init_file = Path(CODE_DIR) / subpath / "__init__.py"
+        if init_file.parent.exists() and not init_file.exists():
+            init_file.touch()
+
+    if not Path(BASE_CONFIG_PATH).exists():
+        raise FileNotFoundError(f"Base config not found at: {BASE_CONFIG_PATH}")
+
+    with open(BASE_CONFIG_PATH, "r", encoding="utf-8") as f:
         base_cfg = yaml.safe_load(f)
 
     results = []
@@ -258,12 +261,19 @@ def main():
         results.append(row)
 
     results_df = pd.DataFrame(results)
-    out_path = f"{CODE_DIR}/experiment_results.csv"
+    out_path = f"{CODE_DIR}/experiment_comparison.csv"
     results_df.to_csv(out_path, index=False)
 
-    print(f"\n\n{'='*70}\nALL EXPERIMENTS COMPLETE\n{'='*70}")
-    print(results_df.to_string(index=False))
-    print(f"\nFull results saved to: {out_path}")
+    print(f"\n\n{'='*75}\nEXPERIMENT SWEEP COMPLETE — SUMMARY TABLE\n{'='*75}")
+    display_cols = [
+        "label", "model", "lr", "epochs", "lora_r", 
+        "base_cosine_sim", "ft_cosine_sim", "Δ_cosine_sim",
+        "judge_composite", "status"
+    ]
+    # Filter to existing columns in case of experiment failure
+    cols = [c for c in display_cols if c in results_df.columns]
+    print(results_df[cols].to_string(index=False))
+    print(f"\nFull table with all metrics saved to: {out_path}")
 
 
 if __name__ == "__main__":
