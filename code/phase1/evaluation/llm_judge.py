@@ -331,8 +331,16 @@ def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
         try:
             resp = client.messages.create(**call_kwargs, temperature=judge_cfg.get("temperature", 0.0))
         except (TypeError, Exception):
-            resp = client.messages.create(**call_kwargs)
-        return resp.content[0].text
+        # Safely extract text from all blocks to avoid returning None
+        text_parts = []
+        for block in getattr(resp, "content", []):
+            if getattr(block, "type", "") == "text" and hasattr(block, "text") and block.text:
+                text_parts.append(block.text)
+            elif hasattr(block, "text") and block.text:
+                text_parts.append(block.text)
+
+        result_text = "\n".join(text_parts).strip()
+        return result_text if result_text else "{}"
 
 def _openai_call(messages: list[dict], judge_cfg: dict) -> str:
     import openai
