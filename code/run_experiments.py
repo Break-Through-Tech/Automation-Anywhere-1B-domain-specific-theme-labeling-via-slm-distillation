@@ -251,7 +251,7 @@ def run_one_experiment(exp: dict, base_cfg: dict) -> dict:
     return row
 
 
-# ── 4. EXECUTION LOOP ─────────────────────────────────────────────────────────
+# ── 4. EXECUTION LOOP WITH AUTO-RESUME ─────────────────────────────────────────
 def main():
     drive_root = Path(DRIVE_ROOT)
     if not drive_root.exists():
@@ -272,14 +272,34 @@ def main():
     with open(BASE_CONFIG_PATH, "r", encoding="utf-8") as f:
         base_cfg = yaml.safe_load(f)
 
-    results = []
+    out_path = Path(f"{CODE_DIR}/experiment_comparison.csv")
+    
+    # ── Check for existing completed trials to resume cleanly ────────────────
+    if out_path.exists():
+        results_df = pd.read_csv(out_path)
+        completed_labels = set(results_df[results_df["status"] == "success"]["label"].tolist())
+        results = results_df.to_dict("records")
+        print(f"[RESUME] Found existing results. Skipping {len(completed_labels)} already completed experiment(s).")
+    else:
+        results = []
+        completed_labels = set()
+
     for exp in EXPERIMENTS:
+        label = exp["label"]
+        if label in completed_labels:
+            print(f"[SKIP] Experiment '{label}' already succeeded in previous run.")
+            continue
+
         row = run_one_experiment(exp, base_cfg)
+        
+        # Remove previous failed attempt if retrying
+        results = [r for r in results if r.get("label") != label]
         results.append(row)
 
-    results_df = pd.DataFrame(results)
-    out_path = f"{CODE_DIR}/experiment_comparison.csv"
-    results_df.to_csv(out_path, index=False)
+        # ── Checkpoint: Save immediately to disk after EACH experiment ───────
+        results_df = pd.DataFrame(results)
+        results_df.to_csv(out_path, index=False)
+        print(f"[CHECKPOINT] Progress saved to {out_path}")
 
     print(f"\n\n{'='*75}\nEXPERIMENT SWEEP COMPLETE — SUMMARY TABLE\n{'='*75}")
     display_cols = [
@@ -289,8 +309,6 @@ def main():
     ]
     cols = [c for c in display_cols if c in results_df.columns]
     print(results_df[cols].to_string(index=False))
-    print(f"\nFull table with all metrics saved to: {out_path}")
-
 
 if __name__ == "__main__":
     main()
