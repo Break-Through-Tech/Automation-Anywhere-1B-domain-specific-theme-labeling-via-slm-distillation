@@ -147,7 +147,7 @@ split:
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
 evaluation:
-  existing_run_dir: "/content/drive/MyDrive/slm-distillation/outputs/20260913_0409_SmolLM2-360M-Instruct_ep3"
+  existing_run_dir: null
   embedding_model:  "all-mpnet-base-v2"
   run_bertscore:    false
   bertscore_model:  "roberta-large"
