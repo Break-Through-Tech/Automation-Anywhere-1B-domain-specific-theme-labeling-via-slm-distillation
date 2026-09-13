@@ -22,7 +22,7 @@ import yaml
 # ── 1. CONFIGURATION & PATHS ──────────────────────────────────────────────────
 REPO = "/content/project"
 CODE_DIR = "/content/project/code"
-BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config.yaml"  # Path to base config
+BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"  # Path to base config
 DRIVE_ROOT = "/content/drive/MyDrive/slm-distillation"
 DEVICE_MODE = "colab"  # "colab", "local_mps", or "local_cpu"
 
