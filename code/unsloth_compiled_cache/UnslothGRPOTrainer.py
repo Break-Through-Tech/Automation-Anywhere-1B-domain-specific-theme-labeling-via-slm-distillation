@@ -1,6 +1,6 @@
 """
-2026.9.1
-2026.9.2
+2026.9.3
+2026.9.4
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -690,6 +690,8 @@ def grpo_compute_loss(
     vespo_lambda_neg = kwargs.get("vespo_lambda_neg", 2.0)
     get_off_policy_mask = kwargs.get("get_off_policy_mask", None)
     off_policy_mask_threshold  = kwargs.get("off_policy_mask_threshold", None)
+    # Only direct callers see this fallback; the trainer always forwards an explicit value.
+    use_bias_correction_kl = kwargs.get("use_bias_correction_kl", False)
     input_ids = input_ids.unsqueeze(-1)
 
     importance_sampling_ratio = None
@@ -782,7 +784,9 @@ def grpo_compute_loss(
     # Reverse KL: low-variance low-bias estimator as used in the GRPO paper.
     if beta != 0.0:
         kl_i = torch.exp(ref - new) - (ref - new) - 1.0
-
+        # TRL order: pre-clamp non-detached coef_1, before the loss_type dispatch.
+        if use_bias_correction_kl:
+            kl_i = kl_i * coef_1
     else:
         # Zeros with the correct shape.
         if importance_sampling_level == "sequence":
@@ -1032,7 +1036,12 @@ def grpo_accumulated_loss(
     **kwargs,
 ):
     # All Unsloth Zoo code licensed under AGPL3
-    bsz, qlen = input_ids.shape
+    # Body-local import so the copy inlined into the generated trainer cache resolves.
+    try:
+        from unsloth_zoo.rl_replacements import _warn_unsupported_grpo_options
+        _warn_unsupported_grpo_options(trainer)
+    except Exception:
+        pass
 
     pixel_values = kwargs.get('pixel_values',None)
     image_grid_thw = kwargs.get('image_grid_thw',None)
@@ -1070,11 +1079,15 @@ def grpo_accumulated_loss(
     kwargs["vespo_lambda_neg"] = trainer.args.vespo_lambda_neg if hasattr(trainer.args, "vespo_lambda_neg") else 2.0
     kwargs["get_off_policy_mask"] = trainer.get_off_policy_mask if hasattr(trainer, "get_off_policy_mask") else None
     kwargs["off_policy_mask_threshold"] = trainer.args.off_policy_mask_threshold  if hasattr(trainer.args, "off_policy_mask_threshold") else None
+    # Follows TRL's own value; older TRL has no such field and False is correct there.
+    kwargs["use_bias_correction_kl"] = getattr(trainer.args, "use_bias_correction_kl", False)
     kwargs["use_vllm"] = trainer.use_vllm
-    # Snap n_chunks to the closest divisor of bsz.
-    factors = [i for i in range(1, bsz + 1) if bsz % i == 0]
-    if n_chunks == -1: n_chunks = bsz
-    n_chunks = factors[min(np.searchsorted(factors, n_chunks), len(factors)-1)]
+    # Generated trainers still pass unsloth_num_chunks; nothing downstream reads it.
+    try:
+        from unsloth_zoo.rl_replacements import _warn_deprecated_n_chunks
+        _warn_deprecated_n_chunks(n_chunks)
+    except Exception:
+        pass
 
     if kwargs["vllm_importance_sampling_clip_max"] is None and kwargs["vllm_importance_sampling_cap"] is not None:
         kwargs["vllm_importance_sampling_clip_min"] = 0
@@ -1934,6 +1947,8 @@ def grpo_compute_loss_slow(
     vespo_lambda_neg = kwargs.get("vespo_lambda_neg", 2.0)
     get_off_policy_mask = kwargs.get("get_off_policy_mask", None)
     off_policy_mask_threshold  = kwargs.get("off_policy_mask_threshold", None)
+    # Only direct callers see this fallback; the trainer always forwards an explicit value.
+    use_bias_correction_kl = kwargs.get("use_bias_correction_kl", False)
     input_ids = input_ids.unsqueeze(-1)
 
     importance_sampling_ratio = None
@@ -2026,7 +2041,9 @@ def grpo_compute_loss_slow(
     # Reverse KL: low-variance low-bias estimator as used in the GRPO paper.
     if beta != 0.0:
         kl_i = torch.exp(ref - new) - (ref - new) - 1.0
-
+        # TRL order: pre-clamp non-detached coef_1, before the loss_type dispatch.
+        if use_bias_correction_kl:
+            kl_i = kl_i * coef_1
     else:
         # Zeros with the correct shape.
         if importance_sampling_level == "sequence":
