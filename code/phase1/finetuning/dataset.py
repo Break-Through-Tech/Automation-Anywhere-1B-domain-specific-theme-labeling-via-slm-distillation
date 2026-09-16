@@ -191,12 +191,7 @@ def _build_examples(
             )
 
             # Length check (skip if too long)
-            encoded = tokenizer(
-                text,
-                add_special_tokens=False,
-                truncation=False,
-            )
-            token_len = len(encoded["input_ids"])
+            token_len = len(tokenizer.encode(text))
             if token_len > max_seq:
                 skipped += 1
                 continue
