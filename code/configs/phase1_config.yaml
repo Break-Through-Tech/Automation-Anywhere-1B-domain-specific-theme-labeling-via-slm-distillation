@@ -17,9 +17,9 @@ seed: 42
 # ── Pipeline steps to run ────────────────────────────────────────────────────
 # Set any step to false to skip it (useful for re-running specific steps).
 pipeline:
-  run_clustering:       false   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
-  run_preprocessing:    false   # Group by cluster, select top-k, save grouped CSV
-  run_label_generation: false   # Call frontier LLM, generate 5 labels per cluster
+  run_clustering:       true   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
+  run_preprocessing:    true   # Group by cluster, select top-k, save grouped CSV
+  run_label_generation: true   # Call frontier LLM, generate 5 labels per cluster
   run_finetuning:       true   # QLoRA / LoRA fine-tune the student SLM
   run_baseline_eval:    true   # Evaluate vanilla (pre-distillation) SLM
   run_finetuned_eval:   true   # Evaluate fine-tuned SLM
