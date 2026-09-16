@@ -120,7 +120,7 @@ student_slm:
   #   "HuggingFaceTB/SmolLM2-1.7B-Instruct"               (1.7B, in-between)
   #   "HuggingFaceTB/SmolLM2-360M-Instruct"               (0.36B, fastest)
 
-  model_id:  "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+  model_id:  "google/gemma-3-4b-it"
   max_seq_length: 2048                             # max tokens per training example
 
 # ── LoRA / QLoRA configuration ───────────────────────────────────────────────
