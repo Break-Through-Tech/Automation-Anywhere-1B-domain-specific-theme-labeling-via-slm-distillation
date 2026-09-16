@@ -21,7 +21,7 @@ BASE_CONFIG_PATH = f"{CODE_DIR}/configs/phase1_config_vd.yaml"
 DRIVE_ROOT = "/content/drive/MyDrive/slm-distillation"
 DEVICE_MODE = "colab"
 
-MASTER_CSV_PATH = Path(f"{DRIVE_ROOT}/experiment_comparison.csv")
+MASTER_CSV_PATH = Path(f"{DRIVE_ROOT}/experiment_comparison_clean.csv")
 SHARED_EVAL_DIR = Path(f"{DRIVE_ROOT}/data/checkpoints/shared_baseline_eval")
 
 DEFAULT_TARGET_MODULES = [
@@ -31,92 +31,29 @@ DEFAULT_TARGET_MODULES = [
 
 # ── 2. HYPERPARAMETER EXPERIMENT GRID ─────────────────────────────────────────
 EXPERIMENTS = [
+    # 1. Standard baseline comparison
     {
-        "label": "baseline_default",
+        "label": "clean_baseline_default",
         "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
         "training.learning_rate": 2.0e-4,
         "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
     },
+    # 2. Optimal step velocity trial (winning rate)
     {
-        "label": "lr_low_5e-5",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "training.learning_rate": 5.0e-5,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-    {
-        "label": "lr_high_5e-4",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "training.learning_rate": 5.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-    {
-        "label": "lr_higher_8e-4",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "training.learning_rate": 8.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-    {
-        "label": "lr_extreme_1e-3",
+        "label": "clean_lr_extreme_1e-3",
         "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
         "training.learning_rate": 1.0e-3,
         "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
     },
-
+    # 3. Intermediate check
     {
-        "label": "epochs_5",
+        "label": "clean_lr_higher_8e-4",
         "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "training.learning_rate": 2.0e-4,
-        "training.num_train_epochs": 5,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-    {
-        "label": "lora_r32_a32",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-360M-Instruct",
-        "training.learning_rate": 2.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 32,
-        "lora.lora_alpha": 32,
-    },
-    {
-        "label": "model_smollm_1.7B",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-        "training.learning_rate": 2.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-
-    {
-        "label": "model_1.7B_lr_5e-4",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-        "training.learning_rate": 5.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-    {
-        "label": "model_1.7B_lr_8e-4",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
         "training.learning_rate": 8.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
-    },
-    {
-        "label": "model_1.7B_lr_1e-3",
-        "student_slm.model_id": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
-        "training.learning_rate": 1.0e-3,
         "training.num_train_epochs": 3,
         "lora.r": 16,
         "lora.lora_alpha": 16,
@@ -146,12 +83,13 @@ def set_nested(cfg: dict, dotted_key: str, value) -> None:
 def build_experiment_config(base_cfg: dict, overrides: dict, skip_baseline_eval: bool = False) -> dict:
     cfg = copy.deepcopy(base_cfg)
 
-    # Freeze pre-training stages
+    # For the first clean run, allow clustering, preprocessing, and labels to generate:
+    # (If already generated once for the clean dataset, set to False)
     cfg["pipeline"]["run_clustering"] = False
     cfg["pipeline"]["run_preprocessing"] = False
     cfg["pipeline"]["run_label_generation"] = False
 
-    # Dynamic pipeline flags
+    # Pipeline run flags
     cfg["pipeline"]["run_finetuning"] = True
     cfg["pipeline"]["run_baseline_eval"] = not skip_baseline_eval
     cfg["pipeline"]["run_finetuned_eval"] = True
