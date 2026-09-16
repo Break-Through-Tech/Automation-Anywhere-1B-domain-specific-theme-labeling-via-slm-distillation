@@ -12,18 +12,18 @@ seed: 42
 
 # ── Pipeline steps to run ────────────────────────────────────────────────────
 pipeline:
-  run_clustering:        false   # Skipped: already completed
-  run_preprocessing:     false   # Skipped: bitext_grouped.csv exists
-  run_label_generation:  false    # MUST RUN: generates labels for student training
-  run_finetuning:        false    # QLoRA fine-tune the student SLM
-  run_baseline_eval:     false    # Evaluate vanilla (pre-distillation) SLM
-  run_finetuned_eval:    false    # Evaluate fine-tuned SLM
+  run_clustering:        true   # Skipped: already completed
+  run_preprocessing:     true   # Skipped: bitext_grouped.csv exists
+  run_label_generation:  true    # MUST RUN: generates labels for student training
+  run_finetuning:        true    # QLoRA fine-tune the student SLM
+  run_baseline_eval:     true    # Evaluate vanilla (pre-distillation) SLM
+  run_finetuned_eval:    true    # Evaluate fine-tuned SLM
   run_llm_judge:         true    # LLM-as-judge evaluation (Claude Haiku)
   run_business_eval:     true    # Latency, cost, throughput metrics
 
 # ── Checkpointing ────────────────────────────────────────────────────────────
 checkpoints:
-  use_checkpoints: true
+  use_checkpoints: false
   embeddings_file:   "checkpoints/phase1_embeddings.pkl"
   umap_file:         "checkpoints/phase1_umap.pkl"
   clustering_file:   "checkpoints/phase1_clustering.csv"
@@ -42,9 +42,9 @@ paths:
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset:
-  name:          "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
+  name:          "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_balanced.csv"
   domain:        "IT"
-  it_categories: ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
+  it_categories: ["ACCOUNT", "DELIVERY", "CONTACT"]
   n_samples:     500
   text_column:   "instruction"
   label_column:  "category"
