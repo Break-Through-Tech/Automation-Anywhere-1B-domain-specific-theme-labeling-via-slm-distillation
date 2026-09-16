@@ -42,7 +42,7 @@ paths:
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset:
-  name:          "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_balanced.csv"
+  name:          "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv"
   domain:        "IT"
   it_categories: ["ACCOUNT", "DELIVERY", "CONTACT"]
   n_samples:     500
