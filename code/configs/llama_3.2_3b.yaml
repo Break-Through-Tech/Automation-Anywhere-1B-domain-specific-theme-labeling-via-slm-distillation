@@ -27,7 +27,7 @@ paths:
   labels_out: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs/labels"
   models_out: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs/models"
   evaluation_out: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs/evaluation"
-  hf_cache: "{drive_root}/hf_cache"
+  hf_cache: "/root/.cache/huggingface"
 
 dataset:
   name: "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv"
@@ -141,3 +141,8 @@ evaluation:
     measure_finetuning_time: true
     measure_inference_latency: true
     n_inference_warmup_runs: 3
+
+colab:
+  mount_drive: false
+  drive_root_override: "/content/drive/MyDrive/slm-distillation"
+  cache_model_on_drive: true
