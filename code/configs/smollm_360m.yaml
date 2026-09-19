@@ -1,0 +1,131 @@
+# smollm_360m.yaml
+
+device_mode: "colab"
+seed: 42
+
+pipeline:
+  run_clustering: true
+  run_preprocessing: true
+  run_label_generation: true
+  run_finetuning: true
+  run_baseline_eval: true
+  run_finetuned_eval: true
+  run_llm_judge: true
+  run_business_eval: true
+
+checkpoints:
+  use_checkpoints: false
+
+paths:
+  drive_root: "/content/drive/MyDrive/slm-distillation"
+  data_raw: "{drive_root}/data/raw"
+  data_processed: "{drive_root}/data/processed_clean"
+  checkpoints: "{drive_root}/runs/smollm_360m/checkpoints"
+  outputs: "{drive_root}/runs/smollm_360m/outputs"
+  labels_out: "{drive_root}/runs/smollm_360m/outputs/labels"
+  models_out: "{drive_root}/runs/smollm_360m/outputs/models"
+  evaluation_out: "{drive_root}/runs/smollm_360m/outputs/evaluation"
+  hf_cache: "{drive_root}/hf_cache"
+
+dataset:
+  name: "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv"
+  domain: "IT"
+  it_categories: ["ACCOUNT", "DELIVERY", "CONTACT"]
+  n_samples: 500
+  text_column: "instruction"
+  label_column: "category"
+
+clustering:
+  embedding_model: "all-MiniLM-L6-v2"
+  umap:
+    n_components: 20
+    n_neighbors: 15
+    min_dist: 0.0
+    metric: "cosine"
+    random_state: 42
+  hdbscan:
+    min_cluster_size: 10
+    min_samples: 5
+    metric: "euclidean"
+    cluster_selection_method: "eom"
+
+top_k: 10
+
+teacher_llm:
+  provider: "anthropic"
+  model: "claude-haiku-4-5"
+  max_tokens: 60
+  sleep_between_calls: 1.0
+  max_retries: 5
+  retry_wait_min: 2
+  retry_wait_max: 60
+
+prompts:
+  system: "You are an expert at analyzing IT, HR, and customer experience support tickets. Return only the label."
+  include_domain_in_prompt: false
+  P1: "Generate a concise label (5-15 words) for this cluster of support tickets.\n\n{tickets}"
+  P2: "What is the primary issue described in these support tickets? Answer in one short phrase.\n\n{tickets}"
+  P3: "Name this cluster as it would appear as a category in an IT support knowledge base.\n\n{tickets}"
+  P4: "Describe the common theme unifying these support tickets in 5-15 words.\n\n{tickets}"
+  P5: "Generate a label for this cluster that would help a chatbot route similar requests correctly.\n\n{tickets}"
+
+student_slm:
+  model_id: "HuggingFaceTB/SmolLM2-360M-Instruct"
+  max_seq_length: 2048
+
+lora:
+  r: 16
+  lora_alpha: 16
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  task_type: "CAUSAL_LM"
+
+qlora:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"
+  use_double_quant: true
+
+training:
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-3
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  bf16: false
+  fp16: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  output_dir: "{paths.models_out}/lora_adapter"
+
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+evaluation:
+  existing_run_dir: null
+  embedding_model: "all-mpnet-base-v2"
+  run_bertscore: false
+  bertscore_model: "roberta-large"
+  judge_mode: "reference"
+  judge_llm:
+    provider: "anthropic"
+    model: "claude-haiku-4-5"
+    n_samples: 50
+    temperature: 0.0
+  business:
+    measure_label_generation_latency: true
+    measure_finetuning_time: true
+    measure_inference_latency: true
+    n_inference_warmup_runs: 3
+
+colab:
+  mount_drive: false
+  drive_root_override: "/content/drive/MyDrive/slm-distillation"
+  cache_model_on_drive: true
