@@ -162,13 +162,26 @@ def _call_anthropic(client, messages: list[dict], llm_cfg: dict) -> str:
     system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
     user_msgs  = [m for m in messages if m["role"] != "system"]
 
-    response = client.messages.create(
-        model=llm_cfg["model"],
-        max_tokens=llm_cfg["max_tokens"],
-        temperature=llm_cfg.get("temperature", 0.0),  # Explicitly passed
-        system=system_msg,
-        messages=user_msgs,
-    )
+    kwargs = {
+        "model": llm_cfg["model"],
+        "max_tokens": llm_cfg.get("max_tokens", 60),
+        "system": system_msg,
+        "messages": user_msgs,
+    }
+    temp = llm_cfg.get("temperature")
+    if temp is not None:
+        try:
+            kwargs["temperature"] = float(temp)
+        except (ValueError, TypeError):
+            pass
+    try:
+        response = client.messages.create(**kwargs)
+    except TypeError as e:
+        if "temperature" in str(e):
+            kwargs.pop("temperature", None)
+            response = client.messages.create(**kwargs)
+        else:
+            raise
     return response.content[0].text
 
 

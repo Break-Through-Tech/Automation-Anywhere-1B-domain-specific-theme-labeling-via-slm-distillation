@@ -1,4 +1,7 @@
 checkpoints:
+  clustered_file: bitext_clustered.csv
+  embeddings_file: phase1_embeddings.pkl
+  umap_file: phase1_umap.pkl
   use_checkpoints: false
 clustering:
   embedding_model: all-MiniLM-L6-v2
@@ -14,13 +17,13 @@ clustering:
     n_neighbors: 15
     random_state: 42
 colab:
-  cache_model_on_drive: true
   drive_root_override: /content/drive/MyDrive/slm-distillation
   mount_drive: false
 dataset:
   domain: IT
   it_categories:
   - ACCOUNT
+  - TECHNICAL_SUPPORT
   - DELIVERY
   - CONTACT
   label_column: category
@@ -59,24 +62,24 @@ lora:
   - down_proj
   task_type: CAUSAL_LM
 paths:
-  checkpoints: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/checkpoints_clean
-  data_processed: '{drive_root}/data/processed_clean'
+  checkpoints: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b_ogprompt/checkpoints_clean
+  data_processed: '{drive_root}/data/processed_clean_ogprompt'
   data_raw: '{drive_root}/data/raw'
   drive_root: /content/drive/MyDrive/slm-distillation
-  evaluation_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean/evaluation
+  evaluation_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b_ogprompt/outputs_clean/evaluation
   hf_cache: /root/.cache/huggingface
-  labels_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean/labels
-  models_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean/models
-  outputs: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean
+  labels_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b_ogprompt/outputs_clean/labels
+  models_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b_ogprompt/outputs_clean/models
+  outputs: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b_ogprompt/outputs_clean
 pipeline:
   run_baseline_eval: true
   run_business_eval: true
-  run_clustering: false
+  run_clustering: true
   run_finetuned_eval: true
   run_finetuning: true
-  run_label_generation: false
+  run_label_generation: true
   run_llm_judge: true
-  run_preprocessing: false
+  run_preprocessing: true
 prompts:
   P1: 'Generate a concise label (5-15 words) for this cluster of support tickets.
 
@@ -102,8 +105,11 @@ prompts:
 
     {tickets}'
   include_domain_in_prompt: false
-  system: You are an expert at analyzing IT, HR, and customer experience support tickets.
-    Return only the label.
+  system: "You are an expert at analyzing IT, HR, and customer experience support\
+    \ tickets. Your task is to generate a concise, descriptive label for a cluster\
+    \ of support tickets. The label should capture the dominant theme, be specific\
+    \ enough to distinguish this cluster from others, and be 5-15 words long. Return\
+    \ only the label \u2014 no explanation, no punctuation at the end, no quotes.\n"
 qlora:
   bnb_4bit_quant_type: nf4
   load_in_4bit: true
@@ -124,6 +130,7 @@ teacher_llm:
   retry_wait_max: 60
   retry_wait_min: 2
   sleep_between_calls: 1.0
+  temperature: 0.3
 top_k: 10
 training:
   bf16: false
@@ -131,12 +138,12 @@ training:
   fp16: true
   gradient_accumulation_steps: 8
   gradient_checkpointing: true
-  learning_rate: 0.0004
+  learning_rate: 0.00035
   load_best_model_at_end: true
   logging_steps: 5
   lr_scheduler_type: cosine
   metric_for_best_model: eval_loss
-  num_train_epochs: 4
+  num_train_epochs: 3
   output_dir: '{paths.models_out}/lora_adapter'
   per_device_train_batch_size: 2
   save_strategy: epoch

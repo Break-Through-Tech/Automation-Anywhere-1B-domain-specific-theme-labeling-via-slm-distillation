@@ -1,11 +1,10 @@
-# llama_3.2_3b.yaml with og prompt
 device_mode: "colab"
 seed: 42
 
 pipeline:
   run_clustering: true
   run_preprocessing: true
-  run_label_generation: true
+  run_label_generation: false  # Uses pre-generated bitext_labeled.csv
   run_finetuning: true
   run_baseline_eval: true
   run_finetuned_eval: true
@@ -22,15 +21,15 @@ paths:
   drive_root: "/content/drive/MyDrive/slm-distillation"
   data_raw: "{drive_root}/data/raw"
   data_processed: "{drive_root}/data/processed_clean"
-  checkpoints: "{drive_root}/runs/llama_3.2_3b_ogprompt/checkpoints"
-  outputs: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs"
-  labels_out: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs/labels"
-  models_out: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs/models"
-  evaluation_out: "{drive_root}/runs/llama_3.2_3b_ogprompt/outputs/evaluation"
-  hf_cache: "{drive_root}/hf_cache"
+  checkpoints: "{drive_root}/runs/llama_3.2_3b/checkpoints"
+  outputs: "{drive_root}/runs/llama_3.2_3b/outputs"
+  labels_out: "{drive_root}/runs/llama_3.2_3b/outputs/labels"
+  models_out: "{drive_root}/runs/llama_3.2_3b/outputs/models"
+  evaluation_out: "{drive_root}/runs/llama_3.2_3b/outputs/evaluation"
+  hf_cache: "/root/.cache/huggingface"
 
 dataset:
-  name: "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv"
+  name: "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
   domain: "IT"
   it_categories: ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
   n_samples: 500
@@ -141,3 +140,8 @@ evaluation:
     measure_finetuning_time: true
     measure_inference_latency: true
     n_inference_warmup_runs: 3
+
+colab:
+  mount_drive: false
+  drive_root_override: "/content/drive/MyDrive/slm-distillation"
+  cache_model_on_drive: true

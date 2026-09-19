@@ -1,0 +1,47 @@
+{
+ "format_version": 1,
+ "files": {
+  ".gitattributes": {
+   "size": 1570,
+   "blob_id": "52373fe24473b1aa44333d318f578ae6bf04b49b"
+  },
+  "README.md": {
+   "size": 6873,
+   "blob_id": "cacc1431feab379110d9667263a73aa1e2119e22"
+  },
+  "chat_template.jinja": {
+   "size": 3827,
+   "blob_id": "1bad6a0f648dccdbec523ca79ba90fbcfc806af0"
+  },
+  "config.json": {
+   "size": 1494,
+   "blob_id": "0f34a0f2d12f2d8b1317656322e27b3b4bba7032"
+  },
+  "generation_config.json": {
+   "size": 234,
+   "blob_id": "cabfc63e394c9abfc712a7c6f9a21d4e050fade8"
+  },
+  "model.safetensors": {
+   "size": 2354805470,
+   "blob_id": "3cd8334beaf60bd13e77d4255b039ee18e9dd6d4",
+   "lfs_sha256": "9151ba0c695e63ba3dea7436a55bb6aa9f2d0a3d7b7eead62086959354bd6c67",
+   "lfs_size": 2354805470,
+   "xet_hash": "1c2a1e7589f94596cdf951b45bec95ac296e58316ff892c66a83da25bb7965ab"
+  },
+  "special_tokens_map.json": {
+   "size": 454,
+   "blob_id": "3c1d04911c269b925af977a3151c9704e990e4d0"
+  },
+  "tokenizer.json": {
+   "size": 17209920,
+   "blob_id": "1c1d8d5c9024994f1d3b00f9662b8dd89ca13cf2",
+   "lfs_sha256": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+   "lfs_size": 17209920,
+   "xet_hash": "da070f8626ee36c29d81d14f7a18b0a943ba6477aaa86b433d0f865f98bf8392"
+  },
+  "tokenizer_config.json": {
+   "size": 54669,
+   "blob_id": "3dc1faa6025cdb195c0889dd8d3d13ca26af9225"
+  }
+ }
+}

@@ -1,10 +1,3 @@
-"""
-run_experiments_llama.py — Multi-dataset runner executing RAW and CLEAN splits
-using the verbatim original system prompt and P1-P5 templates.
-Explicitly disables drive.mount() in subprocess to avoid Colab kernel errors.
-"""
-
-import copy
 import gc
 import os
 import shutil
@@ -12,44 +5,55 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
 import pandas as pd
 import yaml
 
 REPO = Path("/content/project")
 CODE_DIR = REPO / "code"
+CONFIG_BASE = CODE_DIR / "configs/llama_3.2_3b.yaml"
+EXP_DIR = REPO / "experiments/llama_3.2_3b"
 DRIVE_ROOT = Path("/content/drive/MyDrive/slm-distillation")
-DEVICE_MODE = "colab"
+RUNS_BASE = DRIVE_ROOT / "runs/llama_3.2_3b"
+CSV_PATH = EXP_DIR / "experiment_comparison_llama32.csv"
 
-BASE_CONFIG_PATH = CODE_DIR / "configs/llama_3.2_3b.yaml"
-MASTER_CSV_PATH = DRIVE_ROOT / "runs/llama_3.2_3b_ogprompt/experiment_comparison_llama32_ogprompt.csv"
-
-DEFAULT_TARGET_MODULES = [
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "gate_proj", "up_proj", "down_proj"
-]
-
-LLAMA_TRIALS = [
+EXPERIMENTS = [
+    # ── CLEAN DATASET ──
     {
-        "name": "default_baseline",
-        "training.learning_rate": 3.0e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 16,
-        "lora.lora_alpha": 16,
+        "name": "llama32_clean_default_baseline",
+        "split": "clean",
+        "dataset_name": "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv",
+        "lr": 3.0e-4, "epochs": 3, "r": 16, "alpha": 16
     },
     {
-        "name": "lr_optimal_3.5e-4",
-        "training.learning_rate": 3.5e-4,
-        "training.num_train_epochs": 3,
-        "lora.r": 32,
-        "lora.lora_alpha": 32,
+        "name": "llama32_clean_lr_optimal_3.5e-4",
+        "split": "clean",
+        "dataset_name": "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv",
+        "lr": 3.5e-4, "epochs": 3, "r": 32, "alpha": 32
     },
     {
-        "name": "high_capacity_4e-4_ep4",
-        "training.learning_rate": 4.0e-4,
-        "training.num_train_epochs": 4,
-        "lora.r": 32,
-        "lora.lora_alpha": 32,
+        "name": "llama32_clean_high_capacity_4e-4_ep4",
+        "split": "clean",
+        "dataset_name": "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv",
+        "lr": 4.0e-4, "epochs": 4, "r": 32, "alpha": 32
+    },
+    # ── RAW DATASET ──
+    {
+        "name": "llama32_raw_default_baseline",
+        "split": "raw",
+        "dataset_name": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+        "lr": 3.0e-4, "epochs": 3, "r": 16, "alpha": 16
+    },
+    {
+        "name": "llama32_raw_lr_optimal_3.5e-4",
+        "split": "raw",
+        "dataset_name": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+        "lr": 3.5e-4, "epochs": 3, "r": 32, "alpha": 32
+    },
+    {
+        "name": "llama32_raw_high_capacity_4e-4_ep4",
+        "split": "raw",
+        "dataset_name": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+        "lr": 4.0e-4, "epochs": 4, "r": 32, "alpha": 32
     },
 ]
 
@@ -60,240 +64,95 @@ def clear_vram():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-    except ImportError:
+    except Exception:
         pass
 
-def set_nested(cfg: dict, dotted_key: str, value) -> None:
-    keys = dotted_key.split(".")
-    node = cfg
-    for k in keys[:-1]:
-        node = node.setdefault(k, {})
-    node[keys[-1]] = value
-
-def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_baseline: bool) -> tuple[dict, Path, Path]:
-    cfg = copy.deepcopy(base_cfg)
-    is_clean = (data_split == "clean")
-
-    cfg["student_slm"]["model_id"] = "meta-llama/Llama-3.2-3B-Instruct"
-
-    out_dir = DRIVE_ROOT / f"runs/llama_3.2_3b_ogprompt/outputs_{data_split}"
-    chk_dir = DRIVE_ROOT / f"runs/llama_3.2_3b_ogprompt/checkpoints_{data_split}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    chk_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset_name = (
-        "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv"
-        if is_clean else
-        "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
-    )
-
-    cfg["dataset"]["name"] = dataset_name
-    cfg["dataset"]["it_categories"] = ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
-    cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_{data_split}_ogprompt"
-    cfg["paths"]["checkpoints"] = str(chk_dir)
-    cfg["paths"]["outputs"] = str(out_dir)
-    cfg["paths"]["labels_out"] = str(out_dir / "labels")
-    cfg["paths"]["models_out"] = str(out_dir / "models")
-    cfg["paths"]["evaluation_out"] = str(out_dir / "evaluation")
-    cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
-
-    # Prevent drive.mount() inside child subprocess
-    cfg.setdefault("colab", {})
-    cfg["colab"]["mount_drive"] = False
-    cfg["colab"]["drive_root_override"] = "/content/drive/MyDrive/slm-distillation"
-
-    cfg.setdefault("checkpoints", {})
-    cfg["checkpoints"]["use_checkpoints"] = False
-    cfg["checkpoints"]["embeddings_file"] = "phase1_embeddings.pkl"
-    cfg["checkpoints"]["umap_file"] = "phase1_umap.pkl"
-    cfg["checkpoints"]["clustered_file"] = "bitext_clustered.csv"
-
-    proc_dir = DRIVE_ROOT / f"data/processed_{data_split}_ogprompt"
-    has_clustered = (proc_dir / "bitext_clustered.csv").exists()
-    has_labeled = (proc_dir / "bitext_labeled.csv").exists()
-
-    cfg["pipeline"]["run_clustering"] = not has_clustered
-    cfg["pipeline"]["run_preprocessing"] = not has_clustered
-    cfg["pipeline"]["run_label_generation"] = not has_labeled
-
-    cfg["pipeline"]["run_finetuning"] = True
-    cfg["pipeline"]["run_baseline_eval"] = not skip_baseline
-    cfg["pipeline"]["run_finetuned_eval"] = True
-    cfg["pipeline"]["run_llm_judge"] = True
-    cfg["pipeline"]["run_business_eval"] = True
-    cfg["device_mode"] = DEVICE_MODE
-
-    lora_cfg = cfg.setdefault("lora", {})
-    if isinstance(lora_cfg.get("target_modules"), str) or not lora_cfg.get("target_modules"):
-        lora_cfg["target_modules"] = DEFAULT_TARGET_MODULES
-
-    for k, v in trial.items():
-        if k != "name":
-            set_nested(cfg, k, v)
-
-    cfg["training"]["per_device_train_batch_size"] = 2
-    cfg["training"]["gradient_accumulation_steps"] = 8
-    cfg["training"]["fp16"] = True
-    cfg["training"]["bf16"] = False
-    cfg["training"]["gradient_checkpointing"] = True
-    cfg["student_slm"]["max_seq_length"] = 1024
-
-    return cfg, out_dir, chk_dir
-
-def find_latest_run_dir(outputs_dir: Path, since_ts: float) -> Path | None:
-    if not outputs_dir.exists():
+def find_latest_dir(parent: Path, since_ts: float):
+    if not parent.exists():
         return None
-    candidates = [p for p in outputs_dir.iterdir() if p.is_dir() and p.stat().st_mtime >= since_ts]
-    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
-
-def get_metric_val(df: pd.DataFrame, model_name: str, *candidate_cols, default=None):
-    if df.empty:
-        return default
-    sub = df[df["model"] == model_name] if "model" in df.columns else df
-    if "split" in sub.columns and (sub["split"] == "test").any():
-        sub = sub[sub["split"] == "test"]
-    if sub.empty:
-        return default
-    for col in candidate_cols:
-        if col in sub.columns:
-            val = sub[col].iloc[0]
-            try:
-                return round(float(val), 4) if pd.notna(val) else default
-            except (ValueError, TypeError):
-                return default
-    return default
-
-def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict:
-    trial_name = trial["name"]
-    full_label = f"llama32_og_{data_split}_{trial_name}"
-    
-    shared_baseline_dir = DRIVE_ROOT / f"runs/llama_3.2_3b_ogprompt/checkpoints_{data_split}/shared_baseline"
-    shared_baseline_available = (shared_baseline_dir / "baseline_predictions.jsonl").exists()
-
-    print(f"\n{'='*75}\n[EXECUTING]: {full_label} | Split: {data_split.upper()}\n{'='*75}")
-    if shared_baseline_available:
-        print(f"[CACHE] Reusing baseline predictions for {data_split} split.")
-    clear_vram()
-
-    cfg, out_dir, chk_dir = build_config_for_split(base_cfg, trial, data_split, skip_baseline=shared_baseline_available)
-    config_path = CODE_DIR / f"configs/active_{full_label}.yaml"
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(cfg, f, default_flow_style=False)
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = f"{CODE_DIR}:{env.get('PYTHONPATH', '')}"
-
-    start_time = time.time()
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(CODE_DIR / "main.py"),
-            "--phase", "1",
-            "--config", str(config_path),
-            "--device_mode", DEVICE_MODE,
-            "--no_checkpoints"
-        ],
-        cwd=str(CODE_DIR),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    elapsed = time.time() - start_time
-    clear_vram()
-
-    if result.returncode != 0:
-        print(f"[ERROR] Trial '{full_label}' failed:\n{result.stderr[-2500:]}")
-        return {"label": full_label, "dataset": data_split, "status": "failed", "elapsed_min": round(elapsed / 60, 2)}
-
-    run_dir = find_latest_run_dir(out_dir, start_time)
-    if run_dir is None:
-        return {"label": full_label, "dataset": data_split, "status": "missing_output", "elapsed_min": round(elapsed / 60, 2)}
-
-    eval_dir = run_dir / "evaluation"
-    eval_dir.mkdir(parents=True, exist_ok=True)
-
-    shared_baseline_dir.mkdir(parents=True, exist_ok=True)
-    if not shared_baseline_available:
-        for fname in ["baseline_predictions.jsonl", "evaluation/nonllm_baseline.csv", "evaluation/llm_baseline.csv"]:
-            src = run_dir / fname
-            if src.exists():
-                shutil.copy2(src, shared_baseline_dir / Path(fname).name)
-    else:
-        for fname in ["baseline_predictions.jsonl", "nonllm_baseline.csv", "llm_baseline.csv"]:
-            src = shared_baseline_dir / fname
-            dest = run_dir / fname if fname.endswith(".jsonl") else eval_dir / fname
-            if src.exists() and not dest.exists():
-                shutil.copy2(src, dest)
-
-    git_dest = REPO / f"experiments/llama_3.2_3b/og_prompt/{data_split}"
-    git_dest.mkdir(parents=True, exist_ok=True)
-    for fname in ["business_eval.csv", "judge_summary.csv", "metrics_summary.csv"]:
-        if (eval_dir / fname).exists():
-            shutil.copy2(eval_dir / fname, git_dest / fname)
-    shutil.copy2(config_path, git_dest / f"{full_label}.yaml")
-    print(f"✔ Exported metrics to experiments/llama_3.2_3b/og_prompt/{data_split}/")
-
-    m_path = eval_dir / "metrics_summary.csv"
-    j_path = eval_dir / "judge_summary.csv"
-    row = {
-        "label": full_label,
-        "dataset": data_split,
-        "trial_name": trial_name,
-        "status": "success",
-        "elapsed_min": round(elapsed / 60, 2),
-        "lr": trial.get("training.learning_rate", cfg["training"]["learning_rate"]),
-        "epochs": trial.get("training.num_train_epochs", cfg["training"]["num_train_epochs"]),
-        "lora_r": trial.get("lora.r", cfg["lora"]["r"]),
-    }
-
-    if m_path.exists():
-        m_df = pd.read_csv(m_path)
-        row["base_cosine_sim"] = get_metric_val(m_df, "baseline", "cosine_sim_same", "cosine_sim")
-        row["ft_cosine_sim"]   = get_metric_val(m_df, "finetuned", "cosine_sim_same", "cosine_sim")
-        if row.get("ft_cosine_sim") is not None and row.get("base_cosine_sim") is not None:
-            row["Δ_cosine_sim"] = round(row["ft_cosine_sim"] - row["base_cosine_sim"], 4)
-
-    if j_path.exists():
-        j_df = pd.read_csv(j_path)
-        row["judge_composite"]    = get_metric_val(j_df, "finetuned", "composite", "composite_score")
-        row["judge_faithfulness"] = get_metric_val(j_df, "finetuned", "faithfulness")
-        row["judge_specificity"]  = get_metric_val(j_df, "finetuned", "specificity")
-
-    print(f"[COMPLETE] {full_label} in {row['elapsed_min']}m | Judge Composite: {row.get('judge_composite')}")
-    return row
+    dirs = [d for d in parent.iterdir() if d.is_dir() and d.stat().st_mtime >= since_ts]
+    return max(dirs, key=lambda d: d.stat().st_mtime) if dirs else None
 
 def main():
-    print(f"Using base config: {BASE_CONFIG_PATH}")
-    with open(BASE_CONFIG_PATH, "r", encoding="utf-8") as f:
+    EXP_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_BASE, "r") as f:
         base_cfg = yaml.safe_load(f)
 
-    MASTER_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if MASTER_CSV_PATH.exists():
-        results_df = pd.read_csv(MASTER_CSV_PATH)
-        completed = set(results_df[results_df["status"] == "success"]["label"].tolist())
-        results = results_df.to_dict("records")
-    else:
-        results = []
-        completed = set()
+    for exp in EXPERIMENTS:
+        name = exp["name"]
+        split = exp["split"]
+        print("\n" + "=" * 75)
+        print(f"[EXECUTING]: {name} | Split: {split.upper()} | LR: {exp['lr']} | Epochs: {exp['epochs']}")
+        print("=" * 75)
 
-    DATA_SPLITS = ["raw", "clean"]
+        clear_vram()
+        run_out = RUNS_BASE / f"{split}_{name}/outputs"
+        cfg = yaml.safe_load(yaml.dump(base_cfg))
 
-    for trial in LLAMA_TRIALS:
-        for split in DATA_SPLITS:
-            full_label = f"llama32_og_{split}_{trial['name']}"
-            if full_label in completed:
-                print(f"[SKIP] Trial '{full_label}' already completed.")
-                continue
+        # Direct paths
+        cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_{split}"
+        cfg["paths"]["checkpoints"] = f"{{drive_root}}/runs/llama_3.2_3b/{split}_{name}/checkpoints"
+        cfg["paths"]["outputs"] = str(run_out)
+        cfg["paths"]["labels_out"] = str(run_out / "labels")
+        cfg["paths"]["models_out"] = str(run_out / "models")
+        cfg["paths"]["evaluation_out"] = str(run_out / "evaluation")
+        cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
 
-            row = run_single_trial_split(trial, split, base_cfg)
-            results = [r for r in results if r.get("label") != full_label]
-            results.append(row)
-            pd.DataFrame(results).to_csv(MASTER_CSV_PATH, index=False)
+        cfg["dataset"]["name"] = exp["dataset_name"]
+        cfg["training"]["learning_rate"] = exp["lr"]
+        cfg["training"]["num_train_epochs"] = exp["epochs"]
+        cfg["lora"]["r"] = exp["r"]
+        cfg["lora"]["lora_alpha"] = exp["alpha"]
 
-    print("\n" + "="*75 + "\nALL LLAMA 3.2 ORIGINAL PROMPT DUAL-DATASET EXPERIMENTS COMPLETED\n" + "="*75)
-    final_df = pd.DataFrame(results)
-    disp = [c for c in ["label", "dataset", "lr", "epochs", "base_cosine_sim", "ft_cosine_sim", "Δ_cosine_sim", "judge_composite", "elapsed_min", "status"] if c in final_df.columns]
-    print(final_df[disp].to_string(index=False))
+        # Ensure label generation is skipped if bitext_labeled.csv already exists
+        has_labeled = (DRIVE_ROOT / f"data/processed_{split}/bitext_labeled.csv").exists()
+        cfg["pipeline"]["run_label_generation"] = not has_labeled
+
+        # Save specific trial config
+        trial_cfg_path = CODE_DIR / f"configs/{name}.yaml"
+        with open(trial_cfg_path, "w") as f:
+            yaml.dump(cfg, f, default_flow_style=False)
+
+        # Launch subprocess
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{CODE_DIR}:{env.get('PYTHONPATH', '')}"
+        start_ts = time.time()
+
+        res = subprocess.run(
+            [sys.executable, str(CODE_DIR / "main.py"), "--phase", "1", "--config", str(trial_cfg_path), "--device_mode", "colab", "--no_checkpoints"],
+            cwd=str(CODE_DIR),
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        duration = (time.time() - start_ts) / 60.0
+        clear_vram()
+
+        if res.returncode != 0:
+            print(f"[ERROR] Trial '{name}' failed:\n{res.stderr[-2000:]}")
+            continue
+
+        run_dir = find_latest_dir(run_out, start_ts)
+        if not run_dir:
+            print(f"[WARNING] Could not find run output for {name}")
+            continue
+
+        eval_dir = run_dir / "evaluation"
+        dest_split = EXP_DIR / split
+        dest_split.mkdir(parents=True, exist_ok=True)
+
+        for fname in ["metrics_summary.csv", "judge_summary.csv", "business_eval.csv"]:
+            src = eval_dir / fname
+            if src.exists():
+                shutil.copy2(src, dest_split / f"{name}_{fname}")
+                shutil.copy2(src, dest_split / fname)  # Also keep canonical active file
+
+        shutil.copy2(trial_cfg_path, dest_split / f"{name}.yaml")
+        print(f"✔ Completed {name} in {duration:.2f} min. Exported to {dest_split}")
+
+    print("\n" + "=" * 75)
+    print("ALL RUNS COMPLETE ON THE TEAM PROMPT!")
+    print("=" * 75)
 
 if __name__ == "__main__":
     main()
