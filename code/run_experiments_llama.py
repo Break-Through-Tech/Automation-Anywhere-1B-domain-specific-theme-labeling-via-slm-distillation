@@ -1,6 +1,7 @@
 """
 run_experiments_llama.py — Multi-dataset runner executing RAW and CLEAN splits
 using the verbatim original system prompt and P1-P5 templates.
+Explicitly disables drive.mount() in subprocess to avoid Colab kernel errors.
 """
 
 import copy
@@ -28,7 +29,6 @@ DEFAULT_TARGET_MODULES = [
     "gate_proj", "up_proj", "down_proj"
 ]
 
-# Hyperparameter trials across both splits
 LLAMA_TRIALS = [
     {
         "name": "default_baseline",
@@ -97,6 +97,11 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg["paths"]["evaluation_out"] = str(out_dir / "evaluation")
     cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
 
+    # Prevent drive.mount() inside child subprocess
+    cfg.setdefault("colab", {})
+    cfg["colab"]["mount_drive"] = False
+    cfg["colab"]["drive_root_override"] = "/content/drive/MyDrive/slm-distillation"
+
     cfg.setdefault("checkpoints", {})
     cfg["checkpoints"]["use_checkpoints"] = False
     cfg["checkpoints"]["embeddings_file"] = "phase1_embeddings.pkl"
@@ -107,7 +112,6 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     has_clustered = (proc_dir / "bitext_clustered.csv").exists()
     has_labeled = (proc_dir / "bitext_labeled.csv").exists()
 
-    # Self-healing pipeline checks
     cfg["pipeline"]["run_clustering"] = not has_clustered
     cfg["pipeline"]["run_preprocessing"] = not has_clustered
     cfg["pipeline"]["run_label_generation"] = not has_labeled
