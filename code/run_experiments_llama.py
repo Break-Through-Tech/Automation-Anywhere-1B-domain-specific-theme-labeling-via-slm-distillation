@@ -1,5 +1,7 @@
+%%writefile /content/project/code/run_experiments_llama.py
 """
-run_experiments_llama.py — High-efficiency, isolated hyperparameter runner for Llama 3.2-3B across BOTH raw and clean datasets automatically.
+run_experiments_llama.py — Dedicated multi-dataset hyperparameter runner for Llama 3.2-3B.
+Uses configs/llama_3.2_3b.yaml as the base configuration.
 """
 
 import copy
@@ -17,9 +19,16 @@ import yaml
 # ── 1. PATHS & SETTINGS ────────────────────────────────────────────────────────
 REPO = Path("/content/project")
 CODE_DIR = REPO / "code"
-BASE_CONFIG_PATH = CODE_DIR / "configs/phase1_config_vd.yaml"
 DRIVE_ROOT = Path("/content/drive/MyDrive/slm-distillation")
 DEVICE_MODE = "colab"
+
+# Check code/configs first, then repo root configs/
+if (CODE_DIR / "configs/llama_3.2_3b.yaml").exists():
+    BASE_CONFIG_PATH = CODE_DIR / "configs/llama_3.2_3b.yaml"
+elif (REPO / "configs/llama_3.2_3b.yaml").exists():
+    BASE_CONFIG_PATH = REPO / "configs/llama_3.2_3b.yaml"
+else:
+    raise FileNotFoundError("Could not find llama_3.2_3b.yaml in code/configs/ or configs/")
 
 MASTER_CSV_PATH = DRIVE_ROOT / "runs/llama_3.2_3b/experiment_comparison_llama32.csv"
 
@@ -29,7 +38,6 @@ DEFAULT_TARGET_MODULES = [
 ]
 
 # ── 2. HYPERPARAMETER TRIALS (Run across BOTH Raw & Clean) ─────────────────────
-# Define the experimental knobs here. The runner handles executing each on raw AND clean.
 LLAMA_TRIALS = [
     {
         "name": "default_baseline",
@@ -46,7 +54,7 @@ LLAMA_TRIALS = [
         "lora.lora_alpha": 32,
     },
     {
-        "name": "high_capacity_4e-4_ep4",   # Push for >= 4.0 - 4.5
+        "name": "high_capacity_4e-4_ep4",   # Target score >= 4.0 - 4.5
         "training.learning_rate": 4.0e-4,
         "training.num_train_epochs": 4,
         "lora.r": 32,
@@ -76,10 +84,8 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg = copy.deepcopy(base_cfg)
     is_clean = (data_split == "clean")
 
-    # Set Model ID
     cfg["student_slm"]["model_id"] = "meta-llama/Llama-3.2-3B-Instruct"
 
-    # Strict output/checkpoint routing per split
     out_dir = DRIVE_ROOT / f"runs/llama_3.2_3b/outputs_{data_split}"
     chk_dir = DRIVE_ROOT / f"runs/llama_3.2_3b/checkpoints_{data_split}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -101,7 +107,6 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg["paths"]["evaluation_out"] = str(out_dir / "evaluation")
     cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
 
-    # Reuse processed clusters/labels if available
     proc_dir = DRIVE_ROOT / f"data/processed_{data_split}"
     if (proc_dir / "bitext_labeled.csv").exists():
         cfg["pipeline"]["run_clustering"] = False
@@ -112,7 +117,6 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
         cfg["pipeline"]["run_preprocessing"] = True
         cfg["pipeline"]["run_label_generation"] = True
 
-    # Pipeline run flags
     cfg["pipeline"]["run_finetuning"] = True
     cfg["pipeline"]["run_baseline_eval"] = not skip_baseline
     cfg["pipeline"]["run_finetuned_eval"] = True
@@ -120,17 +124,14 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg["pipeline"]["run_business_eval"] = True
     cfg["device_mode"] = DEVICE_MODE
 
-    # Lora target modules
     lora_cfg = cfg.setdefault("lora", {})
     if isinstance(lora_cfg.get("target_modules"), str) or not lora_cfg.get("target_modules"):
         lora_cfg["target_modules"] = DEFAULT_TARGET_MODULES
 
-    # Apply hyperparameter overrides
     for k, v in trial.items():
         if k != "name":
             set_nested(cfg, k, v)
 
-    # 3B T4 VRAM Guardrails
     cfg["training"]["per_device_train_batch_size"] = 2
     cfg["training"]["gradient_accumulation_steps"] = 8
     cfg["training"]["fp16"] = True
@@ -167,7 +168,6 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
     trial_name = trial["name"]
     full_label = f"llama32_{data_split}_{trial_name}"
     
-    # Baseline cache check per split
     shared_baseline_dir = DRIVE_ROOT / f"runs/llama_3.2_3b/checkpoints_{data_split}/shared_baseline"
     shared_baseline_available = (shared_baseline_dir / "baseline_predictions.jsonl").exists()
 
@@ -213,7 +213,6 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
     eval_dir = run_dir / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # Manage baseline cache
     shared_baseline_dir.mkdir(parents=True, exist_ok=True)
     if not shared_baseline_available:
         for fname in ["baseline_predictions.jsonl", "evaluation/nonllm_baseline.csv", "evaluation/llm_baseline.csv"]:
@@ -227,7 +226,6 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
             if src.exists() and not dest.exists():
                 shutil.copy2(src, dest)
 
-    # Export to Git experiments directory
     git_dest = REPO / f"experiments/llama_3.2_3b/{data_split}"
     git_dest.mkdir(parents=True, exist_ok=True)
     for fname in ["business_eval.csv", "judge_summary.csv", "metrics_summary.csv"]:
@@ -236,7 +234,6 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
     shutil.copy2(config_path, git_dest / f"{full_label}.yaml")
     print(f"✔ Exported metrics to experiments/llama_3.2_3b/{data_split}/")
 
-    # Record row
     m_path = eval_dir / "metrics_summary.csv"
     j_path = eval_dir / "judge_summary.csv"
     row = {
@@ -268,6 +265,7 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
 
 # ── 4. MAIN DISPATCHER ────────────────────────────────────────────────────────
 def main():
+    print(f"Using base config: {BASE_CONFIG_PATH}")
     with open(BASE_CONFIG_PATH, "r", encoding="utf-8") as f:
         base_cfg = yaml.safe_load(f)
 
@@ -280,7 +278,6 @@ def main():
         results = []
         completed = set()
 
-    # Automatically iterate through both dataset splits for every trial
     DATA_SPLITS = ["raw", "clean"]
 
     for trial in LLAMA_TRIALS:
