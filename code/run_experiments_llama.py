@@ -1,4 +1,3 @@
-%%writefile /content/project/code/run_experiments_llama.py
 """
 run_experiments_llama.py — Dedicated multi-dataset hyperparameter runner for Llama 3.2-3B.
 Uses configs/llama_3.2_3b.yaml as the base configuration.
