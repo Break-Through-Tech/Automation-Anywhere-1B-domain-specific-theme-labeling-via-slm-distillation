@@ -1,5 +1,6 @@
 """
-run_experiments_llama.py — Resilient dual-dataset runner with full checkpoint mapping.
+run_experiments_llama.py — Multi-dataset runner executing RAW and CLEAN splits
+using the verbatim original system prompt and P1-P5 templates.
 """
 
 import copy
@@ -19,20 +20,15 @@ CODE_DIR = REPO / "code"
 DRIVE_ROOT = Path("/content/drive/MyDrive/slm-distillation")
 DEVICE_MODE = "colab"
 
-if (CODE_DIR / "configs/llama_3.2_3b.yaml").exists():
-    BASE_CONFIG_PATH = CODE_DIR / "configs/llama_3.2_3b.yaml"
-elif (REPO / "configs/llama_3.2_3b.yaml").exists():
-    BASE_CONFIG_PATH = REPO / "configs/llama_3.2_3b.yaml"
-else:
-    raise FileNotFoundError("Could not find llama_3.2_3b.yaml in code/configs/ or configs/")
-
-MASTER_CSV_PATH = DRIVE_ROOT / "runs/llama_3.2_3b/experiment_comparison_llama32.csv"
+BASE_CONFIG_PATH = CODE_DIR / "configs/llama_3.2_3b.yaml"
+MASTER_CSV_PATH = DRIVE_ROOT / "runs/llama_3.2_3b_ogprompt/experiment_comparison_llama32_ogprompt.csv"
 
 DEFAULT_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj"
 ]
 
+# Hyperparameter trials across both splits
 LLAMA_TRIALS = [
     {
         "name": "default_baseline",
@@ -80,8 +76,8 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
 
     cfg["student_slm"]["model_id"] = "meta-llama/Llama-3.2-3B-Instruct"
 
-    out_dir = DRIVE_ROOT / f"runs/llama_3.2_3b/outputs_{data_split}"
-    chk_dir = DRIVE_ROOT / f"runs/llama_3.2_3b/checkpoints_{data_split}"
+    out_dir = DRIVE_ROOT / f"runs/llama_3.2_3b_ogprompt/outputs_{data_split}"
+    chk_dir = DRIVE_ROOT / f"runs/llama_3.2_3b_ogprompt/checkpoints_{data_split}"
     out_dir.mkdir(parents=True, exist_ok=True)
     chk_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,8 +88,8 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     )
 
     cfg["dataset"]["name"] = dataset_name
-    cfg["dataset"]["it_categories"] = ["ACCOUNT", "DELIVERY", "CONTACT"]
-    cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_{data_split}"
+    cfg["dataset"]["it_categories"] = ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
+    cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_{data_split}_ogprompt"
     cfg["paths"]["checkpoints"] = str(chk_dir)
     cfg["paths"]["outputs"] = str(out_dir)
     cfg["paths"]["labels_out"] = str(out_dir / "labels")
@@ -101,18 +97,17 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg["paths"]["evaluation_out"] = str(out_dir / "evaluation")
     cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
 
-    # Ensure required checkpoint keys exist
     cfg.setdefault("checkpoints", {})
     cfg["checkpoints"]["use_checkpoints"] = False
     cfg["checkpoints"]["embeddings_file"] = "phase1_embeddings.pkl"
     cfg["checkpoints"]["umap_file"] = "phase1_umap.pkl"
     cfg["checkpoints"]["clustered_file"] = "bitext_clustered.csv"
 
-    proc_dir = DRIVE_ROOT / f"data/processed_{data_split}"
+    proc_dir = DRIVE_ROOT / f"data/processed_{data_split}_ogprompt"
     has_clustered = (proc_dir / "bitext_clustered.csv").exists()
     has_labeled = (proc_dir / "bitext_labeled.csv").exists()
 
-    # Step validation
+    # Self-healing pipeline checks
     cfg["pipeline"]["run_clustering"] = not has_clustered
     cfg["pipeline"]["run_preprocessing"] = not has_clustered
     cfg["pipeline"]["run_label_generation"] = not has_labeled
@@ -132,7 +127,6 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
         if k != "name":
             set_nested(cfg, k, v)
 
-    # 3B T4 VRAM safeguards
     cfg["training"]["per_device_train_batch_size"] = 2
     cfg["training"]["gradient_accumulation_steps"] = 8
     cfg["training"]["fp16"] = True
@@ -167,9 +161,9 @@ def get_metric_val(df: pd.DataFrame, model_name: str, *candidate_cols, default=N
 
 def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict:
     trial_name = trial["name"]
-    full_label = f"llama32_{data_split}_{trial_name}"
+    full_label = f"llama32_og_{data_split}_{trial_name}"
     
-    shared_baseline_dir = DRIVE_ROOT / f"runs/llama_3.2_3b/checkpoints_{data_split}/shared_baseline"
+    shared_baseline_dir = DRIVE_ROOT / f"runs/llama_3.2_3b_ogprompt/checkpoints_{data_split}/shared_baseline"
     shared_baseline_available = (shared_baseline_dir / "baseline_predictions.jsonl").exists()
 
     print(f"\n{'='*75}\n[EXECUTING]: {full_label} | Split: {data_split.upper()}\n{'='*75}")
@@ -227,13 +221,13 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
             if src.exists() and not dest.exists():
                 shutil.copy2(src, dest)
 
-    git_dest = REPO / f"experiments/llama_3.2_3b/{data_split}"
+    git_dest = REPO / f"experiments/llama_3.2_3b/og_prompt/{data_split}"
     git_dest.mkdir(parents=True, exist_ok=True)
     for fname in ["business_eval.csv", "judge_summary.csv", "metrics_summary.csv"]:
         if (eval_dir / fname).exists():
             shutil.copy2(eval_dir / fname, git_dest / fname)
     shutil.copy2(config_path, git_dest / f"{full_label}.yaml")
-    print(f"✔ Exported metrics to experiments/llama_3.2_3b/{data_split}/")
+    print(f"✔ Exported metrics to experiments/llama_3.2_3b/og_prompt/{data_split}/")
 
     m_path = eval_dir / "metrics_summary.csv"
     j_path = eval_dir / "judge_summary.csv"
@@ -282,7 +276,7 @@ def main():
 
     for trial in LLAMA_TRIALS:
         for split in DATA_SPLITS:
-            full_label = f"llama32_{split}_{trial['name']}"
+            full_label = f"llama32_og_{split}_{trial['name']}"
             if full_label in completed:
                 print(f"[SKIP] Trial '{full_label}' already completed.")
                 continue
@@ -292,7 +286,7 @@ def main():
             results.append(row)
             pd.DataFrame(results).to_csv(MASTER_CSV_PATH, index=False)
 
-    print("\n" + "="*75 + "\nALL LLAMA 3.2 DUAL-DATASET EXPERIMENTS COMPLETED\n" + "="*75)
+    print("\n" + "="*75 + "\nALL LLAMA 3.2 ORIGINAL PROMPT DUAL-DATASET EXPERIMENTS COMPLETED\n" + "="*75)
     final_df = pd.DataFrame(results)
     disp = [c for c in ["label", "dataset", "lr", "epochs", "base_cosine_sim", "ft_cosine_sim", "Δ_cosine_sim", "judge_composite", "elapsed_min", "status"] if c in final_df.columns]
     print(final_df[disp].to_string(index=False))
