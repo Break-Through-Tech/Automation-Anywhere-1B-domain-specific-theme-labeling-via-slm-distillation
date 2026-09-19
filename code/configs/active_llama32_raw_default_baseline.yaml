@@ -28,7 +28,7 @@ dataset:
   - CONTACT
   label_column: category
   n_samples: 500
-  name: /content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv
+  name: bitext/Bitext-customer-support-llm-chatbot-training-dataset
   text_column: instruction
 device_mode: colab
 evaluation:
@@ -62,22 +62,22 @@ lora:
   - down_proj
   task_type: CAUSAL_LM
 paths:
-  checkpoints: '{drive_root}/runs/llama_3.2_3b/checkpoints'
-  data_processed: '{drive_root}/data/processed_clean'
+  checkpoints: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/checkpoints_raw
+  data_processed: '{drive_root}/data/processed_raw'
   data_raw: '{drive_root}/data/raw'
   drive_root: /content/drive/MyDrive/slm-distillation
-  evaluation_out: '{drive_root}/runs/llama_3.2_3b/outputs/evaluation'
-  hf_cache: '{drive_root}/hf_cache'
-  labels_out: '{drive_root}/runs/llama_3.2_3b/outputs/labels'
-  models_out: '{drive_root}/runs/llama_3.2_3b/outputs/models'
-  outputs: '{drive_root}/runs/llama_3.2_3b/outputs'
+  evaluation_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_raw/evaluation
+  hf_cache: /root/.cache/huggingface
+  labels_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_raw/labels
+  models_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_raw/models
+  outputs: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_raw
 pipeline:
   run_baseline_eval: true
   run_business_eval: true
   run_clustering: true
   run_finetuned_eval: true
   run_finetuning: true
-  run_label_generation: true
+  run_label_generation: false
   run_llm_judge: true
   run_preprocessing: true
 prompts:
@@ -139,7 +139,7 @@ training:
   logging_steps: 5
   lr_scheduler_type: cosine
   metric_for_best_model: eval_loss
-  num_train_epochs: 2
+  num_train_epochs: 3
   output_dir: '{paths.models_out}/lora_adapter'
   per_device_train_batch_size: 2
   save_strategy: epoch

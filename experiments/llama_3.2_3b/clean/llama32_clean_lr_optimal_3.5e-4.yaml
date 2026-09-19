@@ -1,7 +1,4 @@
 checkpoints:
-  clustered_file: bitext_clustered.csv
-  embeddings_file: phase1_embeddings.pkl
-  umap_file: phase1_umap.pkl
   use_checkpoints: false
 clustering:
   embedding_model: all-MiniLM-L6-v2
@@ -49,9 +46,9 @@ evaluation:
   run_bertscore: false
 lora:
   bias: none
-  lora_alpha: 16
+  lora_alpha: 32
   lora_dropout: 0.05
-  r: 16
+  r: 32
   target_modules:
   - q_proj
   - k_proj
@@ -62,24 +59,24 @@ lora:
   - down_proj
   task_type: CAUSAL_LM
 paths:
-  checkpoints: '{drive_root}/runs/llama_3.2_3b/checkpoints'
+  checkpoints: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/checkpoints_clean
   data_processed: '{drive_root}/data/processed_clean'
   data_raw: '{drive_root}/data/raw'
   drive_root: /content/drive/MyDrive/slm-distillation
-  evaluation_out: '{drive_root}/runs/llama_3.2_3b/outputs/evaluation'
-  hf_cache: '{drive_root}/hf_cache'
-  labels_out: '{drive_root}/runs/llama_3.2_3b/outputs/labels'
-  models_out: '{drive_root}/runs/llama_3.2_3b/outputs/models'
-  outputs: '{drive_root}/runs/llama_3.2_3b/outputs'
+  evaluation_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean/evaluation
+  hf_cache: /root/.cache/huggingface
+  labels_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean/labels
+  models_out: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean/models
+  outputs: /content/drive/MyDrive/slm-distillation/runs/llama_3.2_3b/outputs_clean
 pipeline:
   run_baseline_eval: true
   run_business_eval: true
-  run_clustering: true
+  run_clustering: false
   run_finetuned_eval: true
   run_finetuning: true
-  run_label_generation: true
+  run_label_generation: false
   run_llm_judge: true
-  run_preprocessing: true
+  run_preprocessing: false
 prompts:
   P1: 'Generate a concise label (5-15 words) for this cluster of support tickets.
 
@@ -134,12 +131,12 @@ training:
   fp16: true
   gradient_accumulation_steps: 8
   gradient_checkpointing: true
-  learning_rate: 0.0003
+  learning_rate: 0.00035
   load_best_model_at_end: true
   logging_steps: 5
   lr_scheduler_type: cosine
   metric_for_best_model: eval_loss
-  num_train_epochs: 2
+  num_train_epochs: 3
   output_dir: '{paths.models_out}/lora_adapter'
   per_device_train_batch_size: 2
   save_strategy: epoch
