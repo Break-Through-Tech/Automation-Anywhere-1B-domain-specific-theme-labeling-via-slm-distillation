@@ -1,6 +1,5 @@
-
 """
-run_experiments_llama.py — Resilient Llama 3.2-3B Multi-Dataset Runner.
+run_experiments_llama.py — Resilient dual-dataset runner with full checkpoint mapping.
 """
 
 import copy
@@ -102,11 +101,18 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg["paths"]["evaluation_out"] = str(out_dir / "evaluation")
     cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
 
+    # Ensure required checkpoint keys exist
+    cfg.setdefault("checkpoints", {})
+    cfg["checkpoints"]["use_checkpoints"] = False
+    cfg["checkpoints"]["embeddings_file"] = "phase1_embeddings.pkl"
+    cfg["checkpoints"]["umap_file"] = "phase1_umap.pkl"
+    cfg["checkpoints"]["clustered_file"] = "bitext_clustered.csv"
+
     proc_dir = DRIVE_ROOT / f"data/processed_{data_split}"
     has_clustered = (proc_dir / "bitext_clustered.csv").exists()
     has_labeled = (proc_dir / "bitext_labeled.csv").exists()
 
-    # If clustered file is missing, we must allow clustering and preprocessing to run
+    # Step validation
     cfg["pipeline"]["run_clustering"] = not has_clustered
     cfg["pipeline"]["run_preprocessing"] = not has_clustered
     cfg["pipeline"]["run_label_generation"] = not has_labeled
@@ -126,6 +132,7 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
         if k != "name":
             set_nested(cfg, k, v)
 
+    # 3B T4 VRAM safeguards
     cfg["training"]["per_device_train_batch_size"] = 2
     cfg["training"]["gradient_accumulation_steps"] = 8
     cfg["training"]["fp16"] = True
