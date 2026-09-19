@@ -1,0 +1,23 @@
+GitHub Repo (experiments/):
+experiments/
+├── smollm_360m/
+│   ├── raw/
+│   └── clean/
+├── smollm_1.7b/
+│   ├── raw/
+│   └── clean/
+└── llama_3.2_3b/
+    ├── raw/
+    └── clean/
+
+Google Drive (runs/):
+/content/drive/MyDrive/slm-distillation/
+├── data/
+│   ├── raw/
+│   ├── cleaned/
+│   ├── processed_raw/
+│   └── processed_clean/
+└── runs/
+    ├── smollm_360m/
+    ├── smollm_1.7b/
+    └── llama_3.2_3b/
