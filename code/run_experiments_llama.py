@@ -1,6 +1,6 @@
+
 """
-run_experiments_llama.py — Dedicated multi-dataset hyperparameter runner for Llama 3.2-3B.
-Uses configs/llama_3.2_3b.yaml as the base configuration.
+run_experiments_llama.py — Resilient Llama 3.2-3B Multi-Dataset Runner.
 """
 
 import copy
@@ -15,13 +15,11 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-# ── 1. PATHS & SETTINGS ────────────────────────────────────────────────────────
 REPO = Path("/content/project")
 CODE_DIR = REPO / "code"
 DRIVE_ROOT = Path("/content/drive/MyDrive/slm-distillation")
 DEVICE_MODE = "colab"
 
-# Check code/configs first, then repo root configs/
 if (CODE_DIR / "configs/llama_3.2_3b.yaml").exists():
     BASE_CONFIG_PATH = CODE_DIR / "configs/llama_3.2_3b.yaml"
 elif (REPO / "configs/llama_3.2_3b.yaml").exists():
@@ -36,7 +34,6 @@ DEFAULT_TARGET_MODULES = [
     "gate_proj", "up_proj", "down_proj"
 ]
 
-# ── 2. HYPERPARAMETER TRIALS (Run across BOTH Raw & Clean) ─────────────────────
 LLAMA_TRIALS = [
     {
         "name": "default_baseline",
@@ -53,7 +50,7 @@ LLAMA_TRIALS = [
         "lora.lora_alpha": 32,
     },
     {
-        "name": "high_capacity_4e-4_ep4",   # Target score >= 4.0 - 4.5
+        "name": "high_capacity_4e-4_ep4",
         "training.learning_rate": 4.0e-4,
         "training.num_train_epochs": 4,
         "lora.r": 32,
@@ -61,7 +58,6 @@ LLAMA_TRIALS = [
     },
 ]
 
-# ── 3. HELPERS ─────────────────────────────────────────────────────────────────
 def clear_vram():
     gc.collect()
     try:
@@ -107,14 +103,13 @@ def build_config_for_split(base_cfg: dict, trial: dict, data_split: str, skip_ba
     cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
 
     proc_dir = DRIVE_ROOT / f"data/processed_{data_split}"
-    if (proc_dir / "bitext_labeled.csv").exists():
-        cfg["pipeline"]["run_clustering"] = False
-        cfg["pipeline"]["run_preprocessing"] = False
-        cfg["pipeline"]["run_label_generation"] = False
-    else:
-        cfg["pipeline"]["run_clustering"] = True
-        cfg["pipeline"]["run_preprocessing"] = True
-        cfg["pipeline"]["run_label_generation"] = True
+    has_clustered = (proc_dir / "bitext_clustered.csv").exists()
+    has_labeled = (proc_dir / "bitext_labeled.csv").exists()
+
+    # If clustered file is missing, we must allow clustering and preprocessing to run
+    cfg["pipeline"]["run_clustering"] = not has_clustered
+    cfg["pipeline"]["run_preprocessing"] = not has_clustered
+    cfg["pipeline"]["run_label_generation"] = not has_labeled
 
     cfg["pipeline"]["run_finetuning"] = True
     cfg["pipeline"]["run_baseline_eval"] = not skip_baseline
@@ -262,7 +257,6 @@ def run_single_trial_split(trial: dict, data_split: str, base_cfg: dict) -> dict
     print(f"[COMPLETE] {full_label} in {row['elapsed_min']}m | Judge Composite: {row.get('judge_composite')}")
     return row
 
-# ── 4. MAIN DISPATCHER ────────────────────────────────────────────────────────
 def main():
     print(f"Using base config: {BASE_CONFIG_PATH}")
     with open(BASE_CONFIG_PATH, "r", encoding="utf-8") as f:
