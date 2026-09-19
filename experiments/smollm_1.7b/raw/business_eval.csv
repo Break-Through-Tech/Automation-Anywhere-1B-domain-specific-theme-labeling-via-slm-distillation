@@ -1,0 +1,12 @@
+metric,value,unit,description
+label_gen_latency_mean_s,0.9049982366107759,seconds per call,Mean latency per LLM call (claude-haiku-4-5)
+label_gen_latency_p95_s,1.0238991260528565,seconds per call,95th percentile latency
+label_gen_total_calls,105.0,API calls,Total teacher LLM API calls made
+slm_inference_latency_mean_s_baseline,0.5930991172790527,seconds per cluster per prompt,Mean SLM inference latency (baseline)
+slm_throughput_labels_per_min_baseline,101.16352942027738,labels per minute,SLM throughput (baseline)
+slm_inference_latency_mean_s_finetuned,0.6596294641494751,seconds per cluster per prompt,Mean SLM inference latency (finetuned)
+slm_throughput_labels_per_min_finetuned,90.96015757477402,labels per minute,SLM throughput (finetuned)
+finetuning_wall_time_s,80.64778399467468,seconds,Total LoRA/QLoRA fine-tuning time (HuggingFaceTB/SmolLM2-1.7B-Instruct)
+finetuning_wall_time_min,1.344129733244578,minutes,Total fine-tuning time in minutes
+teacher_llm_estimated_cost_usd,0.01365,USD,Estimated API cost for 105 label generation calls
+slm_inference_estimated_cost_usd,0.0,USD,SLM inference cost (local GPU/Colab = ~$0)
