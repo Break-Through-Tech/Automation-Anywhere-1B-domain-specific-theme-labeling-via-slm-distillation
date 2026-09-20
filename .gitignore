@@ -36,3 +36,6 @@ code/hf_cache/
 hf_cache/
 *.pkl
 .BTT_env/
+
+# Allow experiment summary CSVs to be committed
+!experiments/**/*.csv
