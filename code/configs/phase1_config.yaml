@@ -54,7 +54,7 @@ dataset:
   domain:        "IT"                              # IT | HR | CX
   # Bitext categories used as IT proxy:
   it_categories: ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
-  n_samples:     500                               # number of tickets to use
+  n_samples:     2000                               # number of tickets to use
   text_column:   "instruction"                     # Bitext's ticket text column
   label_column:  "category"                        # used for EDA only, not for training
 
