@@ -1,6 +1,6 @@
 """
-2026.9.3
-2026.9.4
+2026.9.6
+2026.9.7
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -34,7 +34,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from unsloth_zoo.temporary_patches.common import torch_compile
 from typing import Any, List, Optional, Tuple, Union, Dict, Set, Callable
-from peft.tuners.lora.inc import (torch)
+from peft.tuners.lora.variants import (Any, F, torch)
 
 
 torch_addmm = torch.addmm
@@ -95,7 +95,7 @@ def unsloth_forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.T
             lora_B = self.lora_B[active_adapter]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
-            
+            x = (self._cast_input_dtype(x, lora_A.weight.dtype)) if active_adapter in getattr(self, "lora_variant", {}) else x
             if active_adapter not in self.lora_variant:  # vanilla LoRA
                 return lora_forward(result, lora_A, lora_B, dropout, x, scaling).to(torch_result_dtype)
             else:

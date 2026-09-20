@@ -1,6 +1,6 @@
 """
-2026.9.3
-2026.9.4
+2026.9.6
+2026.9.7
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -64,6 +64,7 @@ from unsloth_zoo import DEVICE_TYPE_TORCH, DEVICE_COUNT
 
 
 from unsloth_zoo.loss_utils import (
+    HAS_CUT_CROSS_ENTROPY,
     fused_linear_cross_entropy,
     unsloth_fused_ce_loss,
 )
@@ -138,7 +139,18 @@ def raise_logits_error(*args, **kwargs): raise NotImplementedError(LOGITS_ERROR_
 def return_none(*args, **kwargs): return None
 class EmptyLogits:
     def __init__(self): return
-    def raise_getattr_error(self, attr): return return_none if attr == "to" else raise_logits_error
+    def raise_getattr_error(self, attr):
+        if attr == "to": return return_none
+        # A catch-all __getattr__ makes hasattr() true for every name, dunders included, so the
+        # sentinel answers yes to protocol probes it cannot honour. torch.distributed's output cast
+        # tests `hasattr(x, "__dataclass_fields__")` and then calls `dataclasses.replace(x)` on
+        # whatever said yes, so with FSDP2 mixed precision every step died in
+        # `TypeError: replace() should be called on dataclass instances` (unsloth#409, reached
+        # through `_fsdp_state._cast_output_dtype`). Protocol probes get an honest AttributeError;
+        # ordinary attribute access still gets the callable that explains UNSLOTH_RETURN_LOGITS.
+        if len(attr) > 4 and attr.startswith("__") and attr.endswith("__"):
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {attr!r}")
+        return raise_logits_error
     __getitem__ = raise_logits_error
     __getattr__ = raise_getattr_error
     def __repr__(self): return LOGITS_ERROR_STRING
@@ -607,7 +619,7 @@ def Gemma3ForCausalLM_forward(
             logits = logits / (self.config.final_logit_softcapping)
             logits = torch.tanh(logits)
             logits = logits * (self.config.final_logit_softcapping)
-    elif (() == () and () == ()) and (UNSLOTH_ENABLE_CCE) and NOT_RETURN_LOGITS and self.loss_function.__name__.endswith("ForCausalLMLoss") and labels is not None and not requires_grad_:
+    elif (() == () and () == ()) and (UNSLOTH_ENABLE_CCE and HAS_CUT_CROSS_ENTROPY) and NOT_RETURN_LOGITS and self.loss_function.__name__.endswith("ForCausalLMLoss") and labels is not None and not requires_grad_:
         loss = fused_linear_cross_entropy(
             hidden_states      = hidden_states[:, slice_indices, :],
             lm_weight          = self.lm_head.weight,

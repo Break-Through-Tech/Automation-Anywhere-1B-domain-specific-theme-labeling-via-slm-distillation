@@ -1,6 +1,6 @@
 """
-2026.9.3
-2026.9.4
+2026.9.6
+2026.9.7
 5.5.0
 0.24.0
 __UNSLOTH_VERSIONING__
@@ -1465,7 +1465,9 @@ class _UnslothSFTTrainer(BaseTrainer):
         if packing:
             # Use TRL's pack_dataset if available
             try:
-                pack_dataset
+                # A presence probe, not a use: TRL exports pack_dataset only on some
+                # versions, and the bare name is what the except below is for.
+                pack_dataset  # noqa: F821
             except:
                 print("Unsloth: Hugging Face's packing is currently buggy - we're disabling it for now!")
                 return dataset
