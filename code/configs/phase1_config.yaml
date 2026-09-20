@@ -29,7 +29,7 @@ pipeline:
 # ── Checkpointing ────────────────────────────────────────────────────────────
 # Set use_checkpoints: false to recompute everything from scratch.
 checkpoints:
-  use_checkpoints: false
+  use_checkpoints: true
   embeddings_file:   "checkpoints/phase1_embeddings.pkl"
   umap_file:         "checkpoints/phase1_umap.pkl"
   clustering_file:   "checkpoints/phase1_clustering.csv"
