@@ -39,3 +39,13 @@ hf_cache/
 
 # Allow experiment summary CSVs to be committed
 !experiments/**/*.csv
+
+# Caches and Locks
+huggingface_tokenizers_cache/
+unsloth_compiled_cache/
+*.lock
+.locks/
+CACHEDIR.TAG
+**/runs/
+**/checkpoints/
+# Keep experiment evaluation summaries
