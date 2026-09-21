@@ -174,7 +174,7 @@ def run_phase1(cfg: dict) -> None:
 
         # We need a tokenizer for dataset construction; load a temp one
         _, tokenizer_tmp = load_model_and_tokenizer(cfg)
-        if pipe_cfg["run_finetuning"] or not train_path.exists():
+        if not train_path.exists():
             logger.info("\n" + "━" * 60 + "\n  STEP 4: Building dataset\n" + "━" * 60)
             split_paths = build_dataset(cfg, labeled_df, tokenizer_tmp)
         else:
