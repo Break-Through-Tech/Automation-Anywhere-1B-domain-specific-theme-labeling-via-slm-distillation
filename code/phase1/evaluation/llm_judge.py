@@ -144,8 +144,10 @@ def run_llm_judge(
         )
         results = _make_perfect_teacher_rows(sampled, dims)
         results_df = pd.DataFrame(results)
-        results_df.to_csv(output_path, index=False)
-        _save_llm_tag_file(results_df, output_path, tag, dims)
+        cache_dir = Path(output_path).parent / "_cache"
+        cache_dir.mkdir(exist_ok=True)
+        results_df.to_csv(cache_dir / Path(output_path).name, index=False)
+        _save_llm_tag_file(results_df, str(cache_dir / Path(output_path).name), tag, dims)
         _log_judge_summary(results_df, fine_tuned, eval_label, dims)
         return results_df
 
@@ -207,10 +209,14 @@ def run_llm_judge(
             logger.info(f"[llm_judge] {i + 1}/{len(sampled)} judged.")
 
     results_df = pd.DataFrame(results)
-    results_df.to_csv(output_path, index=False)
-    logger.info(f"[llm_judge] Judge scores → {output_path}")
+    # Save to _cache/ (internal, not for direct user review)
+    cache_dir = Path(output_path).parent / "_cache"
+    cache_dir.mkdir(exist_ok=True)
+    cache_path = cache_dir / Path(output_path).name
+    results_df.to_csv(cache_path, index=False)
+    logger.info(f"[llm_judge] Judge scores → {cache_path}")
 
-    _save_llm_tag_file(results_df, output_path, tag, dims)
+    _save_llm_tag_file(results_df, str(cache_path), tag, dims)
     _log_judge_summary(results_df, fine_tuned, eval_label, dims)
     return results_df
 
@@ -311,6 +317,7 @@ def _judge_openai(ticket_texts, reference, candidate, judge_cfg):
 
 
 def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
+    import re
     import anthropic
     from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -323,29 +330,31 @@ def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
         reraise=True,
     )
     def _call():
-        call_kwargs = {
-            "model": judge_cfg["model"],
-            "max_tokens": judge_cfg.get("max_tokens", 256),
-            "messages": messages,
-        }
-        try:
-            resp = client.messages.create(**call_kwargs, temperature=judge_cfg.get("temperature", 0.0))
-        except (TypeError, Exception):
-            resp = client.messages.create(**call_kwargs)
-
-        text_parts = []
-        for block in getattr(resp, "content", []):
-            if getattr(block, "type", "") == "text" and hasattr(block, "text") and block.text:
-                text_parts.append(block.text)
-            elif hasattr(block, "text") and block.text:
-                text_parts.append(block.text)
-
-        result_text = "\n".join(text_parts).strip()
-        return result_text if result_text else "{}"
+        kwargs = dict(
+            model=judge_cfg["model"],
+            max_tokens=200,
+            temperature=judge_cfg["temperature"],
+            messages=messages,
+        )
+        for _ in range(len(kwargs) + 1):
+            try:
+                return client.messages.create(**kwargs).content[0].text
+            except TypeError as exc:
+                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+                if not match:
+                    raise
+                bad = match.group(1)
+                logger.warning(
+                    f"[llm_judge] Anthropic SDK rejected param '{bad}' — removing and retrying."
+                )
+                kwargs.pop(bad, None)
+        raise RuntimeError("[llm_judge] Could not call Anthropic API — all params rejected.")
 
     return _call()
 
+
 def _openai_call(messages: list[dict], judge_cfg: dict) -> str:
+    import re
     import openai
     from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -358,13 +367,25 @@ def _openai_call(messages: list[dict], judge_cfg: dict) -> str:
         reraise=True,
     )
     def _call():
-        resp = client.chat.completions.create(
+        kwargs = dict(
             model=judge_cfg["model"],
             max_tokens=200,
             temperature=judge_cfg["temperature"],
             messages=messages,
         )
-        return resp.choices[0].message.content
+        for _ in range(len(kwargs) + 1):
+            try:
+                return client.chat.completions.create(**kwargs).choices[0].message.content
+            except TypeError as exc:
+                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+                if not match:
+                    raise
+                bad = match.group(1)
+                logger.warning(
+                    f"[llm_judge] OpenAI SDK rejected param '{bad}' — removing and retrying."
+                )
+                kwargs.pop(bad, None)
+        raise RuntimeError("[llm_judge] Could not call OpenAI API — all params rejected.")
 
     return _call()
 
