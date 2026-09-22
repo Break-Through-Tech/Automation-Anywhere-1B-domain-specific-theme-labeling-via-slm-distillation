@@ -127,13 +127,13 @@ student_slm:
 lora:
   r:               16        # rank — controls adapter expressiveness
   lora_alpha:      16        # scaling factor (set equal to r as starting point)
-  lora_dropout:    0.05
+  lora_dropout:    0.0
   bias:            "none"
   target_modules:  "all-linear"
   task_type:       "CAUSAL_LM"
 
-qlora:                       # used only in "colab" device_mode
-  load_in_4bit:        true
+qlora:
+  load_in_4bit: false
   bnb_4bit_quant_type: "nf4"
   use_double_quant:    true
 
@@ -145,8 +145,8 @@ training:
   learning_rate:                 2.0e-4
   lr_scheduler_type:             "cosine"
   warmup_ratio:                  0.05
-  bf16:                          true     # bfloat16 on Colab and M1 MPS
-  fp16:                          false
+  bf16:                          false     # bfloat16 on Colab and M1 MPS
+  fp16:                          true
   gradient_checkpointing:        true
   logging_steps:                 10
   eval_strategy:                 "epoch"
