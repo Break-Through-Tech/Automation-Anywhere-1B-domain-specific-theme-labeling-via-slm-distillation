@@ -9,12 +9,19 @@ colab      : CUDA + QLoRA (bitsandbytes 4-bit NF4) + Unsloth if available.
 local_mps  : Apple MPS + LoRA in bfloat16 (no quantisation).
 local_cpu  : CPU + LoRA in float32 (smoke test only — very slow).
 
-The adapter weights are saved to cfg['paths']['models_out']/lora_adapter/.
-The full base model is NOT saved (too large); only the adapter (~50–200 MB).
+Version compatibility handled internally
+----------------------------------------
+- TrainingArguments: _safe_training_args() removes any param rejected by the
+  installed transformers version (e.g. warmup_ratio in Python 3.14 / tf 5.x).
+- SFTTrainer: _build_sft_trainer() tries 'processing_class' then 'tokenizer'
+  to handle the trl >= 0.15 rename.
+- LoRA target_modules: _resolve_target_modules() converts "all-linear" to an
+  explicit layer list, avoiding PEFT versions that iterate the string as chars.
 """
 
 import logging
 import os
+import re
 import time
 from pathlib import Path
 
@@ -28,18 +35,12 @@ logger = logging.getLogger(__name__)
 def load_model_and_tokenizer(cfg: dict):
     """
     Load the student SLM and tokenizer with hardware-appropriate settings.
-
-    Returns
-    -------
-    model, tokenizer
+    Returns (model, tokenizer).
     """
     device_mode = cfg["device_mode"]
-    # .strip() guards against accidental whitespace/newlines from YAML editing
     model_id    = cfg["student_slm"]["model_id"].strip()
+    cfg["student_slm"]["model_id"] = model_id          # persist the stripped value
     hf_cache    = cfg["paths"].get("hf_cache", None)
-
-    # Write the clean value back so the rest of the pipeline sees it too
-    cfg["student_slm"]["model_id"] = model_id
 
     if hf_cache:
         os.environ["HF_HOME"] = hf_cache
@@ -70,24 +71,10 @@ def run_finetuning(
     train_path: str,
     val_path: str,
     business_eval=None,
-) -> str:
+):
     """
     Fine-tune the model and save the LoRA adapter.
-
-    Parameters
-    ----------
-    cfg : dict
-        Loaded phase1_config.yaml.
-    model, tokenizer : from load_model_and_tokenizer()
-    train_path, val_path : str
-        Paths to train.jsonl and val.jsonl.
-    business_eval : BusinessEvaluator | None
-        If provided, total training time is recorded.
-
-    Returns
-    -------
-    str
-        Path to the saved LoRA adapter directory.
+    Returns (peft_model, tokenizer, adapter_dir_str).
     """
     from datasets import load_dataset
     from peft import get_peft_model, LoraConfig, TaskType
@@ -97,22 +84,21 @@ def run_finetuning(
     device_mode = cfg["device_mode"]
     train_cfg   = cfg["training"]
     lora_cfg    = cfg["lora"]
+    model_id    = cfg["student_slm"]["model_id"].strip()
     out_dir     = Path(cfg["paths"]["models_out"]) / "lora_adapter"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load model if not provided (pipeline calls with model=None after restructure)
+    # Load model internally if pipeline passes model=None
     if model is None:
         logger.info("[trainer] Loading model for fine-tuning ...")
         model, tokenizer = load_model_and_tokenizer(cfg)
 
-    # ── Apply LoRA config ─────────────────────────────────────────────────────
-    # If Unsloth is available (Colab), model already has LoRA applied.
-    # Otherwise apply via PEFT.
+    # Apply LoRA — skip if Unsloth already applied it during model load
     if not _is_unsloth_model(model):
         peft_config = LoraConfig(
             r=lora_cfg["r"],
             lora_alpha=lora_cfg["lora_alpha"],
-            target_modules=lora_cfg["target_modules"],
+            target_modules=_resolve_target_modules(model_id, lora_cfg["target_modules"]),
             lora_dropout=lora_cfg["lora_dropout"],
             bias=lora_cfg["bias"],
             task_type=TaskType.CAUSAL_LM,
@@ -120,35 +106,23 @@ def run_finetuning(
         model = get_peft_model(model, peft_config)
         model.print_trainable_parameters()
 
-    # ── Load datasets ─────────────────────────────────────────────────────────
     train_ds = load_dataset("json", data_files=train_path, split="train")
     val_ds   = load_dataset("json", data_files=val_path,   split="train")
-    logger.info(
-        f"[trainer] Train: {len(train_ds)} examples | Val: {len(val_ds)} examples"
-    )
+    logger.info(f"[trainer] Train: {len(train_ds)} | Val: {len(val_ds)} examples")
 
-    # ── Training arguments ────────────────────────────────────────────────────
-    # Use transformers.TrainingArguments directly — more stable across trl
-    # versions than SFTConfig, which changed its base class in trl >= 0.15.
-    #
-    # _safe_training_args() handles Python 3.14 / library-version surprises by
-    # progressively removing any param that TrainingArguments rejects, so the
-    # code never needs to be patched just because a param was renamed upstream.
+    # Build TrainingArguments via the self-healing builder (handles version diffs)
     use_bf16 = train_cfg["bf16"] and _supports_bf16(device_mode)
     use_fp16 = train_cfg["fp16"] and not use_bf16
 
-    # Compute warmup_steps as a manual fallback in case warmup_ratio is rejected
-    # (70 examples / batch_size 4 / grad_accum 4 = ~4 steps per epoch; use 5%
-    #  of total steps, but floor at 0 so it's always safe)
-    _steps_per_epoch = max(
+    steps_per_epoch = max(
         1,
         len(train_ds) // (
             train_cfg["per_device_train_batch_size"]
             * train_cfg["gradient_accumulation_steps"]
         ),
     )
-    _total_steps  = _steps_per_epoch * train_cfg["num_train_epochs"]
-    _warmup_steps = max(0, int(train_cfg["warmup_ratio"] * _total_steps))
+    warmup_steps = max(0, int(train_cfg["warmup_ratio"] * steps_per_epoch
+                               * train_cfg["num_train_epochs"]))
 
     training_kwargs = dict(
         output_dir=str(out_dir),
@@ -158,8 +132,8 @@ def run_finetuning(
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
         learning_rate=train_cfg["learning_rate"],
         lr_scheduler_type=train_cfg["lr_scheduler_type"],
-        warmup_ratio=train_cfg["warmup_ratio"],   # dropped and replaced below if rejected
-        warmup_steps=_warmup_steps,               # fallback; overridden by warmup_ratio if accepted
+        warmup_ratio=train_cfg["warmup_ratio"],  # removed by _safe_training_args if rejected
+        warmup_steps=warmup_steps,               # fallback if warmup_ratio rejected
         bf16=use_bf16,
         fp16=use_fp16,
         gradient_checkpointing=train_cfg["gradient_checkpointing"],
@@ -171,16 +145,12 @@ def run_finetuning(
         metric_for_best_model=train_cfg["metric_for_best_model"],
         report_to="none",
     )
-
-    # Force CPU for local_cpu mode
     if device_mode == "local_cpu":
         training_kwargs["use_cpu"] = True
 
     training_args = _safe_training_args(training_kwargs)
+    trainer       = _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg)
 
-    trainer = _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg)
-
-    # ── Train ─────────────────────────────────────────────────────────────────
     logger.info("[trainer] Starting training ...")
     t0 = time.time()
     trainer.train()
@@ -190,15 +160,10 @@ def run_finetuning(
         business_eval.record_finetuning_time(elapsed)
 
     logger.info(f"[trainer] Training finished in {elapsed / 60:.1f} min.")
-
-    # ── Save adapter only (not full model) ────────────────────────────────────
     trainer.save_model(str(out_dir))
     tokenizer.save_pretrained(str(out_dir))
     logger.info(f"[trainer] LoRA adapter saved to {out_dir}")
 
-    # Return the trained PEFT model so the pipeline can use
-    # model.disable_adapters() / model.enable_adapters() for the
-    # baseline vs fine-tuned inference toggle without reloading.
     return trainer.model, tokenizer, str(out_dir)
 
 
@@ -211,24 +176,8 @@ def generate_label(
     cfg: dict,
     device_mode: str,
 ) -> str:
-    """
-    Generate a single cluster label from a formatted prompt string.
-
-    Parameters
-    ----------
-    prompt_str : str
-        Output of build_inference_prompt() — the full formatted prompt.
-    model, tokenizer : loaded model and tokenizer.
-    cfg : dict
-    device_mode : str
-
-    Returns
-    -------
-    str
-        Generated label text (stripped, without special tokens).
-    """
+    """Generate a single cluster label. Uses greedy decoding for reproducibility."""
     device = _get_device(device_mode)
-
     inputs = tokenizer(
         prompt_str,
         return_tensors="pt",
@@ -240,17 +189,15 @@ def generate_label(
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=25, # original 60
-            do_sample=False,         # greedy decoding for reproducibility
+            max_new_tokens=60,
+            do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    # Decode only the newly generated tokens (after the prompt)
-    input_len = inputs["input_ids"].shape[1]
+    input_len  = inputs["input_ids"].shape[1]
     new_tokens = outputs[0][input_len:]
-    label = tokenizer.decode(new_tokens, skip_special_tokens=True)
-    return label.strip()
+    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
 
 # ── Private: device-specific model loaders ────────────────────────────────────
@@ -259,8 +206,9 @@ def _load_colab(model_id: str, cfg: dict):
     """QLoRA with 4-bit NF4 quantisation. Tries Unsloth first, falls back to PEFT."""
     from transformers import AutoTokenizer
 
-    qlora_cfg = cfg["qlora"]
-    lora_cfg  = cfg["lora"]
+    qlora_cfg      = cfg["qlora"]
+    lora_cfg       = cfg["lora"]
+    target_modules = _resolve_target_modules(model_id, lora_cfg["target_modules"])
 
     try:
         from unsloth import FastLanguageModel
@@ -274,7 +222,7 @@ def _load_colab(model_id: str, cfg: dict):
             model,
             r=lora_cfg["r"],
             lora_alpha=lora_cfg["lora_alpha"],
-            target_modules=lora_cfg["target_modules"],
+            target_modules=target_modules,
             lora_dropout=lora_cfg["lora_dropout"],
             bias=lora_cfg["bias"],
             use_gradient_checkpointing="unsloth",
@@ -292,10 +240,8 @@ def _load_colab(model_id: str, cfg: dict):
         bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=qlora_cfg["use_double_quant"],
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=bnb_config,
-        device_map="auto",
+    model     = AutoModelForCausalLM.from_pretrained(
+        model_id, quantization_config=bnb_config, device_map="auto"
     )
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     return model, tokenizer
@@ -310,56 +256,40 @@ def _load_mps(model_id: str, cfg: dict):
         return _load_cpu(model_id, cfg)
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.bfloat16,
+        model_id, torch_dtype=torch.bfloat16
     ).to("mps")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     return model, tokenizer
 
 
 def _load_cpu(model_id: str, cfg: dict):
-    """LoRA with float32 on CPU (smoke test)."""
+    """LoRA with float32 on CPU (smoke test only — very slow)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     logger.warning(
         "[trainer] Running on CPU. Training will be very slow. "
         "Use local_mps or colab for real experiments."
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.float32,
-    )
+    model     = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float32)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     return model, tokenizer
 
+
+# ── Private: SFTTrainer builder ───────────────────────────────────────────────
 
 def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
     """
     Build SFTTrainer handling both old and new trl / transformers APIs.
 
-    Breaking changes tracked
-    ------------------------
-    transformers 4.x / trl < 0.15:
-        SFTTrainer(model=..., tokenizer=..., max_seq_length=..., dataset_text_field=...)
-    transformers 5.x / trl >= 0.15:
-        - 'tokenizer' renamed to 'processing_class'
-        - 'max_seq_length' and 'dataset_text_field' may have moved elsewhere
+    trl < 0.15  : SFTTrainer(tokenizer=..., max_seq_length=..., dataset_text_field=...)
+    trl >= 0.15 : 'tokenizer' renamed to 'processing_class'
 
-    Strategy
-    --------
-    1. Try with 'processing_class' (modern name) and all SFT-specific params.
-    2. On TypeError, extract the rejected param name:
-       a. If the rejected param IS the current tokenizer key → switch to the
-          other key ('tokenizer' ↔ 'processing_class') and restart.
-       b. Otherwise → remove that param and retry (same as _safe_training_args).
-    3. If both tokenizer key names are exhausted → raise a clear RuntimeError.
+    Strategy: try 'processing_class' first, fall back to 'tokenizer'.
+    Other unexpected kwargs are removed one at a time until the call succeeds.
     """
-    import re
     from trl import SFTTrainer
 
-    max_seq_len = cfg["student_slm"]["max_seq_length"]
-
-    # Try modern API name first, then legacy
+    max_seq_len    = cfg["student_slm"]["max_seq_length"]
     tokenizer_keys = ["processing_class", "tokenizer"]
 
     for tok_key in tokenizer_keys:
@@ -372,126 +302,99 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
             "max_seq_length":     max_seq_len,
             "dataset_text_field": "text",
         }
-        max_iter = len(kwargs) + 1
-        succeeded = False
-
-        for _ in range(max_iter):
+        for _ in range(len(kwargs) + 1):
             try:
                 trainer = SFTTrainer(**kwargs)
-                logger.info(
-                    f"[trainer] SFTTrainer built successfully "
-                    f"(tokenizer param='{tok_key}')."
-                )
+                logger.info(f"[trainer] SFTTrainer built (tokenizer param='{tok_key}').")
                 return trainer
             except TypeError as exc:
-                msg   = str(exc)
-                match = re.search(r"unexpected keyword argument '([^']+)'", msg)
+                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
                 if not match:
-                    # Different TypeError (e.g. wrong type) — stop trying this key
-                    logger.debug(f"[trainer] SFTTrainer non-param TypeError: {exc}")
-                    break
-
-                bad_param = match.group(1)
-
-                if bad_param == tok_key:
-                    # This tokenizer key name is not supported → try the other one
-                    logger.info(
-                        f"[trainer] SFTTrainer rejected '{tok_key}' as tokenizer param — "
-                        f"trying alternative."
-                    )
-                    break   # break inner loop, outer loop tries next tok_key
-
-                logger.warning(
-                    f"[trainer] SFTTrainer rejected param '{bad_param}'. "
-                    "Removing and retrying."
-                )
-                kwargs.pop(bad_param, None)
+                    break   # non-param TypeError — try next tok_key
+                bad = match.group(1)
+                if bad == tok_key:
+                    logger.info(f"[trainer] SFTTrainer rejected '{tok_key}' — trying alternative.")
+                    break   # switch tokenizer key
+                logger.warning(f"[trainer] SFTTrainer rejected param '{bad}' — removing.")
+                kwargs.pop(bad, None)
 
     raise RuntimeError(
-        "[trainer] Could not construct SFTTrainer with any known API combination.\n"
-        f"  trl version:              {_get_pkg_version('trl')}\n"
-        f"  transformers version:     {_get_pkg_version('transformers')}\n"
-        f"  Python version:           {__import__('sys').version.split()[0]}\n"
-        "Please check compatibility between your trl, transformers, and Python versions."
+        "[trainer] Could not construct SFTTrainer.\n"
+        f"  trl={_ver('trl')}  transformers={_ver('transformers')}  "
+        f"Python={__import__('sys').version.split()[0]}"
     )
-
-
-def _get_pkg_version(pkg: str) -> str:
-    try:
-        return __import__(pkg).__version__
-    except Exception:
-        return "unknown"
 
 
 # ── Private: safe TrainingArguments builder ───────────────────────────────────
 
 def _safe_training_args(training_kwargs: dict):
     """
-    Build a TrainingArguments instance, automatically removing any keyword
-    argument that the installed transformers version does not support.
+    Build TrainingArguments, removing any param the installed version rejects.
 
-    This makes the training loop resilient to:
-      - Python 3.14 / dataclass __init__ generation changes
-      - Params renamed between transformers versions (e.g. warmup_ratio →
-        warmup_steps, evaluation_strategy → eval_strategy, etc.)
-      - New trl restructurings that change which args TrainingArguments accepts
-
-    Each removed param is logged with a WARNING so nothing is silently lost.
-
-    Strategy
-    --------
-    1. Try building with all kwargs.
-    2. On TypeError, parse the unsupported param name from the error message.
-    3. Remove that param and retry.
-    4. Repeat until success or until a non-TypeError is raised.
-
-    Notes
-    -----
-    - warmup_ratio and warmup_steps are both included in the initial kwargs;
-      if warmup_ratio is rejected, warmup_steps (a concrete integer) remains
-      as the fallback and achieves the same effect.
-    - The loop is bounded by the number of kwargs, so it cannot infinite-loop.
+    Handles:
+    - Python 3.14 dataclass __init__ changes (e.g. warmup_ratio rejected)
+    - transformers 5.x param renames
+    - warmup_ratio → warmup_steps fallback (both included; ratio removed if rejected)
     """
-    import re
     from transformers import TrainingArguments
 
     kwargs   = dict(training_kwargs)
-    max_iter = len(kwargs) + 1   # safety bound
+    max_iter = len(kwargs) + 1
 
     for _ in range(max_iter):
         try:
             return TrainingArguments(**kwargs)
         except TypeError as exc:
-            msg   = str(exc)
-            match = re.search(r"unexpected keyword argument '([^']+)'", msg)
+            match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
             if not match:
-                # Different TypeError (e.g. wrong value type) — re-raise
                 raise
-            bad_param = match.group(1)
+            bad = match.group(1)
             logger.warning(
-                f"[trainer] TrainingArguments rejected param '{bad_param}' "
-                f"(Python {__import__('sys').version.split()[0]} / "
-                f"transformers {__import__('transformers').__version__}). "
-                "Removing and retrying."
+                f"[trainer] TrainingArguments rejected '{bad}' "
+                f"(transformers {_ver('transformers')}) — removing."
             )
-            kwargs.pop(bad_param, None)
+            kwargs.pop(bad, None)
 
-    # Should never reach here
-    raise RuntimeError(
-        "[trainer] Could not build TrainingArguments after removing all "
-        "unsupported kwargs. Check your transformers installation."
+    raise RuntimeError("[trainer] Could not build TrainingArguments.")
+
+
+# ── Private: target-modules resolver ─────────────────────────────────────────
+
+def _resolve_target_modules(model_id: str, target_modules_cfg) -> list:
+    """
+    Convert 'all-linear' to an explicit layer list before passing to PEFT.
+
+    Some PEFT versions treat 'all-linear' as a string iterable → {'a','l','l',...}.
+    Using an explicit list is safe across all versions.
+
+    LLaMA / SmolLM2 / Mistral / Qwen / Gemma: q/k/v/o_proj + gate/up/down_proj
+    Phi-3 / Phi-3.5: qkv_proj + o_proj + gate_up_proj + down_proj
+    """
+    if target_modules_cfg != "all-linear":
+        return target_modules_cfg   # already explicit — use as-is
+
+    mid = model_id.lower()
+    if any(x in mid for x in ("phi-3.5", "phi-3", "phi3")):
+        modules = ["qkv_proj", "o_proj", "gate_up_proj", "down_proj"]
+    else:
+        modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                   "gate_proj", "up_proj", "down_proj"]
+
+    logger.info(
+        f"[trainer] target_modules 'all-linear' → {modules} "
+        f"(model: {model_id.split('/')[-1]})"
     )
+    return modules
 
 
 # ── Private: utilities ────────────────────────────────────────────────────────
 
 def _configure_tokenizer(tokenizer, model) -> None:
-    """Ensure padding token and left-padding for generation."""
+    """Ensure padding token and right-padding for training."""
     if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token    = tokenizer.eos_token
         model.config.pad_token_id = tokenizer.eos_token_id
-    tokenizer.padding_side = "right"   # right-pad during training
-    # Note: switch to padding_side="left" during generation if batching inference
+    tokenizer.padding_side = "right"
 
 
 def _count_trainable(model) -> int:
@@ -516,3 +419,10 @@ def _get_device(device_mode: str) -> str:
     if device_mode == "local_mps":
         return "mps"
     return "cpu"
+
+
+def _ver(pkg: str) -> str:
+    try:
+        return __import__(pkg).__version__
+    except Exception:
+        return "?"
