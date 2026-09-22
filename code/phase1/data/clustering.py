@@ -140,11 +140,7 @@ def _load_bitext(ds_cfg: dict) -> pd.DataFrame:
     from datasets import load_dataset
 
     logger.info(f"[clustering] Downloading dataset: {ds_cfg['name']}")
-    ds_target = str(ds_cfg["name"])
-    if ds_target.endswith(".csv") or os.path.exists(ds_target):
-        raw = load_dataset("csv", data_files=ds_target, split="train")
-    else:
-        raw = load_dataset(ds_target, split="train")
+    raw = load_dataset(ds_cfg["name"], split="train")
     df  = raw.to_pandas()
 
     logger.info(f"[clustering] Raw dataset: {len(df)} rows")
