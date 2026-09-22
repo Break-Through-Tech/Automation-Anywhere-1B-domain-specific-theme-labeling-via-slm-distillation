@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# configs/llama_3.2_3b.yaml.yaml
+# configs/llama_3.2_3b.yaml
 # Phase 1 configuration: small public dataset, pipeline verification.
 # Run: python main.py --phase 1 --config configs/llama_3.2_3b.yaml.yaml
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9,7 +9,7 @@
 #   "colab"        — CUDA + QLoRA (bitsandbytes + Unsloth). Use on Colab T4.
 #   "local_mps"    — Apple MPS + LoRA bfloat16 (no quantisation). Use on M1/M5 Mac.
 #   "local_cpu"    — CPU + LoRA float32 (smoke test only, very slow). Use anywhere.
-device_mode: "local_mps"   # change to "colab" when running on Colab
+device_mode: "colab"   # change to "colab" when running on Colab
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 seed: 42
@@ -29,7 +29,7 @@ pipeline:
 # ── Checkpointing ────────────────────────────────────────────────────────────
 # Set use_checkpoints: false to recompute everything from scratch.
 checkpoints:
-  use_checkpoints: true
+  use_checkpoints: false
   embeddings_file:   "checkpoints/phase1_embeddings.pkl"
   umap_file:         "checkpoints/phase1_umap.pkl"
   clustering_file:   "checkpoints/phase1_clustering.csv"
@@ -38,16 +38,15 @@ checkpoints:
 # For Colab: set drive_root to "/content/drive/MyDrive/slm-distillation"
 # For local:  set drive_root to an absolute path on your machine
 paths:
-  drive_root:          "."                         # override in Colab
+  drive_root:          "."                         # overriden by Colab mount if active
   data_raw:            "{drive_root}/data/raw"
   data_processed:      "{drive_root}/data/processed_raw"
   checkpoints:         "{drive_root}/data/checkpoints_raw"
-  outputs:             "{drive_root}/runs/llama_3.2_3b"
-  labels_out:          "{drive_root}/runs/llama_3.2_3b/labels"
-  models_out:          "{drive_root}/runs/llama_3.2_3b/models"
-  evaluation_out:      "{drive_root}/runs/llama_3.2_3b/evaluation"
-  hf_cache:            "{drive_root}/hf_cache"     # caches model weights on Drive
-
+  outputs:             "{drive_root}/runs/llama_3.2_3b/llama32_default_raw"
+  labels_out:          "{drive_root}/runs/llama_3.2_3b/llama32_default_raw/labels"
+  models_out:          "{drive_root}/runs/llama_3.2_3b/llama32_default_raw/models"
+  evaluation_out:      "{drive_root}/runs/llama_3.2_3b/llama32_default_raw/evaluation"
+  hf_cache:            "{drive_root}/hf_cache"
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset:
   name:          "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
@@ -129,7 +128,7 @@ lora:
   lora_alpha:      16        # scaling factor (set equal to r as starting point)
   lora_dropout:    0.05
   bias:            "none"
-  target_modules:  "all-linear"
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
   task_type:       "CAUSAL_LM"
 
 qlora:                       # used only in "colab" device_mode
