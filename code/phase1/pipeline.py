@@ -174,8 +174,14 @@ def run_phase1(cfg: dict) -> None:
         train_path = processed_dir / FILE_TRAIN_JSONL
         val_path   = processed_dir / FILE_VAL_JSONL
 
-        # We need a tokenizer for dataset construction; load a temp one
-        _, tokenizer_tmp = load_model_and_tokenizer(cfg)
+        # Dataset construction needs only the chat template and token counter.
+        # Loading the whole 7B/8B model here leaves a second copy in VRAM when
+        # fine-tuning starts, which can OOM on a Colab T4.
+        from transformers import AutoTokenizer
+        tokenizer_tmp = AutoTokenizer.from_pretrained(
+            cfg["student_slm"]["model_id"].strip(),
+            cache_dir=paths.get("hf_cache"),
+        )
         if pipe_cfg["run_finetuning"] or not train_path.exists():
             logger.info("\n" + "━" * 60 + "\n  STEP 4: Building dataset\n" + "━" * 60)
             split_paths = build_dataset(cfg, labeled_df, tokenizer_tmp)
@@ -268,7 +274,7 @@ def run_phase1(cfg: dict) -> None:
                 business_eval=business_eval,
             )
             # Free memory before loading fine-tuned model
-            del base_model
+            del base_model, base_tok
             _clear_device_cache()
 
         # ── 6b: Fine-tuned inference (base model + LoRA adapter) ──────────────
@@ -290,7 +296,7 @@ def run_phase1(cfg: dict) -> None:
                     fine_tuned=True, output_path=str(finetuned_preds_path),
                     business_eval=business_eval,
                 )
-                del ft_model
+                del ft_model, ft_base, ft_tok
                 _clear_device_cache()
             else:
                 logger.warning(

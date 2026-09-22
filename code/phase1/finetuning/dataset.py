@@ -184,10 +184,14 @@ def _build_examples(
             full_messages = messages + [{"role": "assistant", "content": label}]
 
             # Apply model's chat template
+            # Qwen3 defaults to thinking; train on direct labels instead.
+            is_qwen3 = cfg["student_slm"]["model_id"].lower().startswith("qwen/qwen3-")
+            template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
             text = tokenizer.apply_chat_template(
                 full_messages,
                 tokenize=False,
                 add_generation_prompt=False,
+                **template_kwargs,
             )
 
             # Length check (skip if too long)

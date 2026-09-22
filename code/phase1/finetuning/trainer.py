@@ -237,7 +237,9 @@ def _load_colab(model_id: str, cfg: dict):
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=qlora_cfg["load_in_4bit"],
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_compute_dtype=(
+            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        ),
         bnb_4bit_use_double_quant=qlora_cfg["use_double_quant"],
     )
     model     = AutoModelForCausalLM.from_pretrained(

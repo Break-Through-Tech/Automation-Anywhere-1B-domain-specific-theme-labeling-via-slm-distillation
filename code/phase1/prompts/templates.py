@@ -100,9 +100,13 @@ def build_inference_prompt(
         Ready-to-tokenise prompt string (no assistant turn appended).
     """
     messages = build_messages(prompt_id, ticket_texts, cfg, domain)
+    # Match Qwen3 inference to its non-thinking training examples.
+    is_qwen3 = cfg["student_slm"]["model_id"].lower().startswith("qwen/qwen3-")
+    template_kwargs = {"enable_thinking": False} if is_qwen3 else {}
     prompt   = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,   # adds the opening of the assistant turn
+        **template_kwargs,
     )
     return prompt
