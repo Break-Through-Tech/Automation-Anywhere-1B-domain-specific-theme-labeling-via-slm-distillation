@@ -2,7 +2,19 @@
 phase1/labeling/frontier_llm.py
 
 Calls a frontier LLM (Anthropic Claude or OpenAI GPT) to generate cluster labels.
-Uses persistent client sessions, explicit temperature controls, and checkpointing.
+
+For each cluster:
+  - Sends the top-k ticket texts as context
+  - Generates one label per prompt (P1–P5)
+  - Writes results back to the ticket-level labeled CSV
+
+Rate limiting:
+  - Configurable sleep between calls
+  - Exponential backoff on rate-limit errors (via tenacity)
+  - Progress checkpoint every 10 clusters so work is not lost on interruption
+
+Business eval:
+  - Tracks per-call latency via BusinessEvaluator context manager
 """
 
 import json
@@ -10,7 +22,6 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Callable
 
 import pandas as pd
 from tenacity import (
@@ -26,7 +37,7 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_EVERY = 10  # save progress every N clusters
 
 
-# ── Public Entry Point ────────────────────────────────────────────────────────
+# ── Public entry point ────────────────────────────────────────────────────────
 
 def run_label_generation(
     cfg: dict,
@@ -36,6 +47,23 @@ def run_label_generation(
 ) -> pd.DataFrame:
     """
     Generate cluster labels from the teacher frontier LLM.
+
+    Parameters
+    ----------
+    cfg : dict
+        Loaded phase1_config.yaml.
+    clustered_df : pd.DataFrame
+        Ticket-level DataFrame (output of clustering.py).
+    grouped_df : pd.DataFrame
+        Cluster-level DataFrame (output of preprocessing.py).
+    business_eval : BusinessEvaluator | None
+        If provided, latency measurements are recorded.
+
+    Returns
+    -------
+    pd.DataFrame
+        Ticket-level labeled DataFrame: all original columns plus
+        cluster_name_{model}_{P1} … cluster_name_{model}_{P5}.
     """
     from phase1.data.schema import (
         CLUSTER_ID, FILE_LABELED_CSV,
@@ -53,6 +81,7 @@ def run_label_generation(
     out_dir.mkdir(parents=True, exist_ok=True)
     labeled_csv = out_dir / FILE_LABELED_CSV
 
+    # Partial checkpoint: if labeled CSV exists, reload it and skip done clusters
     label_cols = [cluster_name_col(model_id, pid) for pid in PROMPT_IDS]
     if labeled_csv.exists():
         labeled_df = pd.read_csv(labeled_csv)
@@ -63,6 +92,7 @@ def run_label_generation(
             f"[labeling] Resuming — {len(done_clusters)} clusters already labeled."
         )
     else:
+        # Start fresh: copy clustered_df and add empty label columns
         labeled_df = clustered_df.copy()
         for col in label_cols:
             labeled_df[col] = None
@@ -72,8 +102,7 @@ def run_label_generation(
     todo     = [c for c in clusters if c not in done_clusters]
     logger.info(f"[labeling] Generating labels for {len(todo)} clusters ...")
 
-    # Initialize client ONCE to prevent socket leakage across hundreds of calls
-    client = _init_client(provider)
+    llm_caller = _get_llm_caller(provider, llm_cfg)
 
     for i, cluster_id in enumerate(todo):
         cluster_row  = grouped_df[grouped_df[CLUSTER_ID] == cluster_id].iloc[0]
@@ -84,12 +113,7 @@ def run_label_generation(
             messages = build_messages(prompt_id, ticket_texts, cfg, domain)
 
             t0 = time.time()
-            if provider == "anthropic":
-                label = _call_anthropic(client, messages, llm_cfg)
-            elif provider == "openai":
-                label = _call_openai(client, messages, llm_cfg)
-            else:
-                raise ValueError(f"Unknown provider '{provider}'.")
+            label = llm_caller(messages, llm_cfg)
             elapsed = time.time() - t0
 
             if business_eval is not None:
@@ -98,14 +122,15 @@ def run_label_generation(
             row_labels[cluster_name_col(model_id, prompt_id)] = label.strip()
             logger.debug(f"  cluster {cluster_id} | {prompt_id}: {label[:80]}")
 
-            time.sleep(llm_cfg.get("sleep_between_calls", 0.1))
+            # Respect rate limit sleep between calls
+            time.sleep(llm_cfg["sleep_between_calls"])
 
-        # Update all tickets assigned to this cluster
+        # Write labels back to ALL rows belonging to this cluster
         mask = labeled_df[CLUSTER_ID] == cluster_id
         for col, val in row_labels.items():
             labeled_df.loc[mask, col] = val
 
-        # Progress checkpoint
+        # Checkpoint every N clusters
         if (i + 1) % CHECKPOINT_EVERY == 0 or (i + 1) == len(todo):
             labeled_df.to_csv(labeled_csv, index=False)
             logger.info(
@@ -118,85 +143,111 @@ def run_label_generation(
     return labeled_df
 
 
-# ── Client Initializer ────────────────────────────────────────────────────────
+# ── LLM caller factory ────────────────────────────────────────────────────────
 
-def _init_client(provider: str):
-    """Instantiate SDK client once with environment API keys."""
+def _get_llm_caller(provider: str, llm_cfg: dict):
+    """Return a callable that takes (messages, llm_cfg) and returns a label string."""
     if provider == "anthropic":
-        import anthropic
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise EnvironmentError("ANTHROPIC_API_KEY not set in environment.")
-        return anthropic.Anthropic(api_key=api_key)
-
-    if provider == "openai":
-        import openai
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            raise EnvironmentError("OPENAI_API_KEY not set in environment.")
-        return openai.OpenAI(api_key=api_key)
-
-    raise ValueError(f"Unknown provider '{provider}'. Must be 'anthropic' or 'openai'.")
+        return _call_anthropic
+    elif provider == "openai":
+        return _call_openai
+    else:
+        raise ValueError(f"Unknown provider '{provider}'. Must be 'anthropic' or 'openai'.")
 
 
-# ── Robust Callers with Top-Level Retry ────────────────────────────────────────
+# ── Anthropic ─────────────────────────────────────────────────────────────────
 
-def _is_anthropic_retryable(exc: BaseException) -> bool:
+def _call_anthropic(messages: list[dict], llm_cfg: dict) -> str:
+    import re
     import anthropic
-    return isinstance(exc, (anthropic.RateLimitError, anthropic.APIStatusError))
 
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise EnvironmentError("ANTHROPIC_API_KEY not set in environment.")
 
-def _is_openai_retryable(exc: BaseException) -> bool:
-    import openai
-    return isinstance(exc, (openai.RateLimitError, openai.APIStatusError))
+    client = anthropic.Anthropic(api_key=api_key)
 
-
-@retry(
-    retry=retry_if_exception_type((Exception,)),  # Narrowed below via predicate if needed
-    wait=wait_exponential(min=2, max=30),
-    stop=stop_after_attempt(4),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
-def _call_anthropic(client, messages: list[dict], llm_cfg: dict) -> str:
     system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
     user_msgs  = [m for m in messages if m["role"] != "system"]
 
-    kwargs = {
-        "model": llm_cfg["model"],
-        "max_tokens": llm_cfg.get("max_tokens", 60),
-        "system": system_msg,
-        "messages": user_msgs,
-    }
-    temp = llm_cfg.get("temperature")
-    if temp is not None:
-        try:
-            kwargs["temperature"] = float(temp)
-        except (ValueError, TypeError):
-            pass
-    try:
-        response = client.messages.create(**kwargs)
-    except TypeError as e:
-        if "temperature" in str(e):
-            kwargs.pop("temperature", None)
-            response = client.messages.create(**kwargs)
-        else:
-            raise
-    return response.content[0].text
-
-
-@retry(
-    retry=retry_if_exception_type((Exception,)),
-    wait=wait_exponential(min=2, max=30),
-    stop=stop_after_attempt(4),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
-def _call_openai(client, messages: list[dict], llm_cfg: dict) -> str:
-    response = client.chat.completions.create(
-        model=llm_cfg["model"],
-        max_tokens=llm_cfg["max_tokens"],
-        temperature=llm_cfg.get("temperature", 0.0),
-        messages=messages,
+    @retry(
+        retry=retry_if_exception_type((anthropic.RateLimitError, anthropic.APIStatusError)),
+        wait=wait_exponential(
+            min=llm_cfg["retry_wait_min"],
+            max=llm_cfg["retry_wait_max"],
+        ),
+        stop=stop_after_attempt(llm_cfg["max_retries"]),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
     )
-    return response.choices[0].message.content
+    def _call():
+        kwargs = dict(
+            model=llm_cfg["model"],
+            max_tokens=llm_cfg["max_tokens"],
+            temperature=llm_cfg["temperature"],
+            system=system_msg,
+            messages=user_msgs,
+        )
+        # Self-healing: remove any param the installed SDK version rejects
+        for _ in range(len(kwargs) + 1):
+            try:
+                return client.messages.create(**kwargs).content[0].text
+            except TypeError as exc:
+                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+                if not match:
+                    raise
+                bad = match.group(1)
+                logger.warning(
+                    f"[labeling] Anthropic SDK rejected param '{bad}' "
+                    f"(SDK v{anthropic.__version__}) — removing and retrying."
+                )
+                kwargs.pop(bad, None)
+        raise RuntimeError("[labeling] Could not call Anthropic API — all params rejected.")
+
+    return _call()
+
+
+# ── OpenAI ────────────────────────────────────────────────────────────────────
+
+def _call_openai(messages: list[dict], llm_cfg: dict) -> str:
+    import re
+    import openai
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("OPENAI_API_KEY not set in environment.")
+
+    client = openai.OpenAI(api_key=api_key)
+
+    @retry(
+        retry=retry_if_exception_type((openai.RateLimitError, openai.APIStatusError)),
+        wait=wait_exponential(
+            min=llm_cfg["retry_wait_min"],
+            max=llm_cfg["retry_wait_max"],
+        ),
+        stop=stop_after_attempt(llm_cfg["max_retries"]),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _call():
+        kwargs = dict(
+            model=llm_cfg["model"],
+            max_tokens=llm_cfg["max_tokens"],
+            temperature=llm_cfg["temperature"],
+            messages=messages,
+        )
+        for _ in range(len(kwargs) + 1):
+            try:
+                return client.chat.completions.create(**kwargs).choices[0].message.content
+            except TypeError as exc:
+                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+                if not match:
+                    raise
+                bad = match.group(1)
+                logger.warning(
+                    f"[labeling] OpenAI SDK rejected param '{bad}' — removing and retrying."
+                )
+                kwargs.pop(bad, None)
+        raise RuntimeError("[labeling] Could not call OpenAI API — all params rejected.")
+
+    return _call()
