@@ -27,19 +27,30 @@ PROMPT_IDS  = ["P1", "P2", "P3", "P4", "P5"]
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_combine(eval_dir: str | Path) -> None:
+# def run_combine(eval_dir: str | Path) -> None:
+#     """Run all combine operations. Missing per-model files are skipped."""
+#     eval_dir = Path(eval_dir)
+#     combine_latencies(eval_dir)
+#     combine_nonllm_summary(eval_dir)
+#     combine_llm_summary(eval_dir)
+#     combine_nonllm_by_cluster(eval_dir)   # per-cluster pivot for non-LLM metrics
+#     combine_llm_by_cluster(eval_dir)      # per-cluster pivot for judge scores
+
+def run_combine(eval_dir: str | Path, **kwargs) -> None:
     """Run all combine operations. Missing per-model files are skipped."""
     eval_dir = Path(eval_dir)
-    combine_latencies(eval_dir)
+    split_map = kwargs.get("split_map") # Extract split_map if provided
+    
+    combine_latencies(eval_dir, split_map)
     combine_nonllm_summary(eval_dir)
     combine_llm_summary(eval_dir)
-    combine_nonllm_by_cluster(eval_dir)   # per-cluster pivot for non-LLM metrics
-    combine_llm_by_cluster(eval_dir)      # per-cluster pivot for judge scores
+    combine_nonllm_by_cluster(eval_dir, split_map)    # pass it here
+    combine_llm_by_cluster(eval_dir, split_map)       # pass it here
 
 
 # ── Per-cluster non-LLM pivot ─────────────────────────────────────────────────
 
-def combine_nonllm_by_cluster(eval_dir: Path) -> None:
+def combine_nonllm_by_cluster(eval_dir: Path, split_map: dict | None = None) -> None:
     """
     Pivot per-model non-LLM metric files into one wide cluster-level file.
 
@@ -81,12 +92,20 @@ def combine_nonllm_by_cluster(eval_dir: Path) -> None:
         merged = piece if merged is None else merged.join(piece, how="outer")
 
     merged = merged.reset_index().sort_values(["cluster_id", "prompt_id"])
-
-    # Order columns: cluster_id, prompt_id, then grouped by metric
-    ordered = ["cluster_id", "prompt_id"] + [
-        c for c in metric_cols if c in merged.columns
-    ]
-    merged = merged[[c for c in ordered if c in merged.columns]]
+  
+    # Add split column if provided
+    if split_map:
+        merged["split"] = merged["cluster_id"].map(split_map)
+        ordered = ["cluster_id", "split", "prompt_id"] + [
+            c for c in metric_cols if c in merged.columns
+        ]
+    else:
+        # Order columns: cluster_id, prompt_id, then grouped by metric
+        ordered = ["cluster_id", "prompt_id"] + [
+            c for c in metric_cols if c in merged.columns
+        ]
+          
+      merged = merged[[c for c in ordered if c in merged.columns]]
 
     out = eval_dir / "nonllm_by_cluster.csv"
     merged.to_csv(out, index=False)
@@ -95,7 +114,7 @@ def combine_nonllm_by_cluster(eval_dir: Path) -> None:
 
 # ── Per-cluster LLM judge pivot ───────────────────────────────────────────────
 
-def combine_llm_by_cluster(eval_dir: Path) -> None:
+def combine_llm_by_cluster(eval_dir: Path, split_map: dict | None = None) -> None:
     """
     Pivot per-model LLM judge files into one wide cluster-level file.
 
@@ -137,7 +156,13 @@ def combine_llm_by_cluster(eval_dir: Path) -> None:
         merged = piece if merged is None else merged.join(piece, how="outer")
 
     merged = merged.reset_index().sort_values(["cluster_id", "prompt_id"])
-    ordered = ["cluster_id", "prompt_id"] + [c for c in metric_cols if c in merged.columns]
+    
+    if split_map:
+        merged["split"] = merged["cluster_id"].map(split_map)
+        ordered = ["cluster_id", "split", "prompt_id"] + [c for c in metric_cols if c in merged.columns]
+    else:
+        ordered = ["cluster_id", "prompt_id"] + [c for c in metric_cols if c in merged.columns]
+        
     merged = merged[[c for c in ordered if c in merged.columns]]
 
     out = eval_dir / "llm_by_cluster.csv"
@@ -147,7 +172,7 @@ def combine_llm_by_cluster(eval_dir: Path) -> None:
 
 # ── Latency pivot ─────────────────────────────────────────────────────────────
 
-def combine_latencies(eval_dir: Path) -> None:
+def combine_latencies(eval_dir: Path, split_map: dict | None = None) -> None:
     """
     Pivot per-model latency CSVs into one wide cluster-level file.
 
@@ -199,6 +224,21 @@ def combine_latencies(eval_dir: Path) -> None:
     ]
 
     pivot_df = pd.DataFrame(list(rows.values()))
+    
+    if split_map:
+        pivot_df["split"] = pivot_df["cluster_id"].map(split_map)
+        ordered_cols = ["cluster_id", "split"] + [
+            f"{pid}_{tag}_s"
+            for pid in PROMPT_IDS
+            for tag in TAGS
+        ]
+    else:
+        ordered_cols = ["cluster_id"] + [
+            f"{pid}_{tag}_s"
+            for pid in PROMPT_IDS
+            for tag in TAGS
+        ]
+
     # Keep only columns that actually exist
     existing_cols = [c for c in ordered_cols if c in pivot_df.columns]
     pivot_df = pivot_df[existing_cols].sort_values("cluster_id")
