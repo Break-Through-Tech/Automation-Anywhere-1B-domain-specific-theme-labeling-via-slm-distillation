@@ -23,8 +23,8 @@ pipeline:
   run_finetuning:       false   # QLoRA / LoRA fine-tune the student SLM
   run_baseline_eval:    false   # Evaluate vanilla (pre-distillation) SLM
   run_finetuned_eval:   false   # Evaluate fine-tuned SLM
-  run_llm_judge:        false   # LLM-as-judge evaluation (Claude Haiku)
-  run_business_eval:    false   # Latency, cost, throughput metrics
+  run_llm_judge:        true   # LLM-as-judge evaluation (Claude Haiku)
+  run_business_eval:    true   # Latency, cost, throughput metrics
 
 # ── Checkpointing ────────────────────────────────────────────────────────────
 # Set use_checkpoints: false to recompute everything from scratch.
