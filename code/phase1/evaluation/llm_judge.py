@@ -333,7 +333,7 @@ def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
         kwargs = dict(
             model=judge_cfg["model"],
             max_tokens=200,
-            temperature=judge_cfg["temperature"],
+            temperature=float(judge_cfg["temperature"]),
             messages=messages,
         )
         for _ in range(len(kwargs) + 1):
@@ -370,7 +370,7 @@ def _openai_call(messages: list[dict], judge_cfg: dict) -> str:
         kwargs = dict(
             model=judge_cfg["model"],
             max_tokens=200,
-            temperature=judge_cfg["temperature"],
+            temperature=float(judge_cfg["temperature"]),
             messages=messages,
         )
         for _ in range(len(kwargs) + 1):
