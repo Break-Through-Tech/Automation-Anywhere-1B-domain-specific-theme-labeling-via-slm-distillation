@@ -181,7 +181,7 @@ evaluation:
   embedding_model: "all-mpnet-base-v2"
 
   # ── BERTScore (SECONDARY metric — OFF by default for local/Phase 1) ───────
-  run_bertscore: false
+  run_bertscore: true
   bertscore_model: "roberta-large"
 
   # ── LLM-as-Judge ──────────────────────────────────────────────────────────
