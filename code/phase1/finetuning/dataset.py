@@ -254,8 +254,12 @@ def _build_examples(
                     add_generation_prompt=False,
                 )
 
-                token_len = len(
-                    tokenizer.encode(text)
+                encoded = tokenizer(
+                    text,
+                    add_special_tokens=False,
+                    truncation=False,
+                )
+                token_len = len(encoded["input_ids"])
                 )
 
                 if token_len > max_seq:
