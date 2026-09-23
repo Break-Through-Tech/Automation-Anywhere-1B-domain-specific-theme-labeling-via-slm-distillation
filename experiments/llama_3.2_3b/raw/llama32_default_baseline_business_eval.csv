@@ -1,9 +1,0 @@
-metric,value,unit,description
-slm_inference_latency_mean_s_baseline,0.7176393699645996,seconds per cluster per prompt,Mean SLM inference latency (baseline)
-slm_throughput_labels_per_min_baseline,83.60745314594395,labels per minute,SLM throughput (baseline)
-slm_inference_latency_mean_s_finetuned,0.6973987865447998,seconds per cluster per prompt,Mean SLM inference latency (finetuned)
-slm_throughput_labels_per_min_finetuned,86.03398967363373,labels per minute,SLM throughput (finetuned)
-finetuning_wall_time_s,149.73577904701233,seconds,Total LoRA/QLoRA fine-tuning time (meta-llama/Llama-3.2-3B-Instruct)
-finetuning_wall_time_min,2.4955963174502056,minutes,Total fine-tuning time in minutes
-teacher_llm_estimated_cost_usd,0.0,USD,Estimated API cost for 0 label generation calls
-slm_inference_estimated_cost_usd,0.0,USD,SLM inference cost (local GPU/Colab = ~$0)

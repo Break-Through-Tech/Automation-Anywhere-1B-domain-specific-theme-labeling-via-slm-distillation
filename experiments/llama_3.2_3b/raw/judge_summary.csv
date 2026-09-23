@@ -1,4 +1,0 @@
-model,faithfulness,specificity,equivalence,composite
-teacher,5.0,5.0,5.0,5.0
-baseline,3.84,3.32,2.88,3.3466666666666662
-finetuned,4.2,3.76,3.24,3.733333333333333
