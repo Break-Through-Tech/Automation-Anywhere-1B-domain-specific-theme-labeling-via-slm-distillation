@@ -74,8 +74,10 @@ clustering:
     cluster_selection_method: "eom"
 
 # ── Top-k selection ───────────────────────────────────────────────────────────
-top_k: 10                                          # tickets per cluster for LLM input
-
+top_k: 10 # tickets per cluster for LLM input
+data_augmentation:
+  num_variants: 5
+  sample_size: 7
 # ── Frontier LLM (teacher) ────────────────────────────────────────────────────
 teacher_llm:
   provider:      "anthropic"                       # "openai" | "anthropic"
