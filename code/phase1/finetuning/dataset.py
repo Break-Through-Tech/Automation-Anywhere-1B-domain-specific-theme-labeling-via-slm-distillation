@@ -260,7 +260,6 @@ def _build_examples(
                     truncation=False,
                 )
                 token_len = len(encoded["input_ids"])
-                )
 
                 if token_len > max_seq:
                     skipped += 1
