@@ -105,7 +105,7 @@ def combine_nonllm_by_cluster(eval_dir: Path, split_map: dict | None = None) -> 
             c for c in metric_cols if c in merged.columns
         ]
           
-      merged = merged[[c for c in ordered if c in merged.columns]]
+    merged = merged[[c for c in ordered if c in merged.columns]]
 
     out = eval_dir / "nonllm_by_cluster.csv"
     merged.to_csv(out, index=False)
