@@ -1,3 +1,0 @@
-model,cosine_sim_same,cosine_sim_multi,rouge_l_same,rouge_l_multi,bertscore_f1_same,bertscore_f1_multi
-teacher,1.0000000286102295,1.0000000286102295,1.0,1.0,,
-finetuned,0.555209048986435,0.6267483973503113,0.21906930716342482,0.28699077393195044,,
