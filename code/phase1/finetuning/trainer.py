@@ -129,20 +129,29 @@ def run_finetuning(
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
         per_device_eval_batch_size=train_cfg["per_device_train_batch_size"],
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
+      
         learning_rate=train_cfg["learning_rate"],
         lr_scheduler_type=train_cfg["lr_scheduler_type"],
+      
         warmup_ratio=train_cfg["warmup_ratio"],  # removed by _safe_training_args if rejected
-        warmup_steps=warmup_steps,               # fallback if warmup_ratio rejected
+        warmup_steps=warmup_steps,      # fallback if warmup_ratio rejected
         bf16=use_bf16,
         fp16=use_fp16,
+      
         gradient_checkpointing=train_cfg["gradient_checkpointing"],
         gradient_checkpointing_kwargs={"use_reentrant": False},
+      
         logging_steps=train_cfg["logging_steps"],
         eval_strategy=train_cfg["eval_strategy"],
         save_strategy=train_cfg["save_strategy"],
+      
         load_best_model_at_end=train_cfg["load_best_model_at_end"],
         metric_for_best_model=train_cfg["metric_for_best_model"],
+      
         report_to="none",
+        max_length=cfg["student_slm"]["max_seq_length"],
+        completion_only_loss=True,
+        packing=False,
     )
     if device_mode == "local_cpu":
         training_kwargs["use_cpu"] = True
