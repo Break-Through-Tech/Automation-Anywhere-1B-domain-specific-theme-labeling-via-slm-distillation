@@ -333,37 +333,65 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
     )
 
 
-# ── Private: safe TrainingArguments builder ───────────────────────────────────
-
-def _safe_training_args(training_kwargs: dict):
+def _safe_sft_config(training_kwargs: dict):
     """
-    Build TrainingArguments, removing any param the installed version rejects.
+    Build TRL SFTConfig while handling minor version differences.
 
-    Handles:
-    - Python 3.14 dataclass __init__ changes (e.g. warmup_ratio rejected)
-    - transformers 5.x param renames
-    - warmup_ratio → warmup_steps fallback (both included; ratio removed if rejected)
+    Unlike transformers.TrainingArguments, SFTConfig supports
+    completion_only_loss, which is required for prompt-completion
+    distillation training.
     """
-    from transformers import TrainingArguments
+    from trl import SFTConfig
 
-    kwargs   = dict(training_kwargs)
+    kwargs = dict(training_kwargs)
     max_iter = len(kwargs) + 1
 
     for _ in range(max_iter):
         try:
-            return TrainingArguments(**kwargs)
+            return SFTConfig(**kwargs)
+
         except TypeError as exc:
-            match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+            match = re.search(
+                r"unexpected keyword argument '([^']+)'",
+                str(exc),
+            )
+
             if not match:
                 raise
+
             bad = match.group(1)
+
+            # completion_only_loss is essential for this training design.
+            # Do NOT silently remove it.
+            if bad == "completion_only_loss":
+                raise RuntimeError(
+                    "[trainer] Installed TRL version does not support "
+                    "'completion_only_loss'. Upgrade TRL before training."
+                ) from exc
+
+            # Newer TRL uses max_length. Some older releases used
+            # max_seq_length instead.
+            if bad == "max_length":
+                logger.warning(
+                    "[trainer] SFTConfig rejected 'max_length'; "
+                    "trying legacy 'max_seq_length'."
+                )
+
+                kwargs["max_seq_length"] = kwargs.pop("max_length")
+                continue
+
             logger.warning(
-                f"[trainer] TrainingArguments rejected '{bad}' "
-                f"(transformers {_ver('transformers')}) — removing."
+                f"[trainer] SFTConfig rejected '{bad}' "
+                f"(trl {_ver('trl')}) — removing."
             )
+
             kwargs.pop(bad, None)
 
-    raise RuntimeError("[trainer] Could not build TrainingArguments.")
+    raise RuntimeError(
+        "[trainer] Could not build SFTConfig."
+    )
+
+
 
 
 # ── Private: target-modules resolver ─────────────────────────────────────────
