@@ -241,21 +241,28 @@ def _build_examples(
                     domain,
                 )
 
-                full_messages = messages + [
+
+
+
+                completion = [
                     {
                         "role": "assistant",
                         "content": label,
                     }
                 ]
 
-                text = tokenizer.apply_chat_template(
+
+                
+                full_messages = messages + completion
+
+                full_text = tokenizer.apply_chat_template(
                     full_messages,
                     tokenize=False,
                     add_generation_prompt=False,
                 )
 
                 encoded = tokenizer(
-                    text,
+                    full_text,
                     add_special_tokens=False,
                     truncation=False,
                 )
@@ -266,11 +273,23 @@ def _build_examples(
                     continue
 
                 examples.append({
-                    "text": text,
+                    "prompt": messages,
+                    "completion": completion,
                     "cluster_id": int(cid),
                     "prompt_id": prompt_id,
                     "variant_id": variant_id,
                 })
+
+
+
+
+
+
+
+
+
+
+    
 
     if skipped > 0:
         logger.warning(
