@@ -285,53 +285,74 @@ def _load_cpu(model_id: str, cfg: dict):
 
 # ── Private: SFTTrainer builder ───────────────────────────────────────────────
 
-def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
+def _build_sft_trainer(
+    model,
+    tokenizer,
+    train_ds,
+    val_ds,
+    training_args,
+    cfg,
+):
     """
-    Build SFTTrainer handling both old and new trl / transformers APIs.
+    Build SFTTrainer for prompt-completion training.
 
-    trl < 0.15  : SFTTrainer(tokenizer=..., max_seq_length=..., dataset_text_field=...)
-    trl >= 0.15 : 'tokenizer' renamed to 'processing_class'
+    Dataset format:
+        {
+            "prompt": [...system/user messages...],
+            "completion": [...assistant message...]
+        }
 
-    Strategy: try 'processing_class' first, fall back to 'tokenizer'.
-    Other unexpected kwargs are removed one at a time until the call succeeds.
+    SFTConfig(completion_only_loss=True) ensures that loss is
+    calculated only on completion tokens.
     """
     from trl import SFTTrainer
 
-    max_seq_len    = cfg["student_slm"]["max_seq_length"]
-    tokenizer_keys = ["processing_class", "tokenizer"]
+    tokenizer_keys = [
+        "processing_class",   # modern TRL
+        "tokenizer",          # older TRL
+    ]
 
     for tok_key in tokenizer_keys:
+
         kwargs = {
-            "model":              model,
-            tok_key:              tokenizer,
-            "train_dataset":      train_ds,
-            "eval_dataset":       val_ds,
-            "args":               training_args,
-            "max_seq_length":     max_seq_len,
-            "dataset_text_field": "text",
+            "model": model,
+            tok_key: tokenizer,
+            "train_dataset": train_ds,
+            "eval_dataset": val_ds,
+            "args": training_args,
         }
-        for _ in range(len(kwargs) + 1):
-            try:
-                trainer = SFTTrainer(**kwargs)
-                logger.info(f"[trainer] SFTTrainer built (tokenizer param='{tok_key}').")
-                return trainer
-            except TypeError as exc:
-                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
-                if not match:
-                    break   # non-param TypeError — try next tok_key
-                bad = match.group(1)
-                if bad == tok_key:
-                    logger.info(f"[trainer] SFTTrainer rejected '{tok_key}' — trying alternative.")
-                    break   # switch tokenizer key
-                logger.warning(f"[trainer] SFTTrainer rejected param '{bad}' — removing.")
-                kwargs.pop(bad, None)
+
+        try:
+            trainer = SFTTrainer(**kwargs)
+
+            logger.info(
+                f"[trainer] SFTTrainer built "
+                f"(tokenizer param='{tok_key}', "
+                f"prompt-completion dataset, "
+                f"completion-only loss)."
+            )
+
+            return trainer
+
+        except TypeError as exc:
+
+            # If this TRL version does not support processing_class,
+            # try legacy tokenizer argument.
+            if tok_key == "processing_class":
+                logger.info(
+                    "[trainer] SFTTrainer rejected "
+                    "'processing_class' — trying legacy 'tokenizer'."
+                )
+                continue
+
+            raise
 
     raise RuntimeError(
         "[trainer] Could not construct SFTTrainer.\n"
-        f"  trl={_ver('trl')}  transformers={_ver('transformers')}  "
+        f"  trl={_ver('trl')}  "
+        f"transformers={_ver('transformers')}  "
         f"Python={__import__('sys').version.split()[0]}"
     )
-
 
 def _safe_sft_config(training_kwargs: dict):
     """
