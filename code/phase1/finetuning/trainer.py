@@ -78,8 +78,7 @@ def run_finetuning(
     """
     from datasets import load_dataset
     from peft import get_peft_model, LoraConfig, TaskType
-    from transformers import TrainingArguments
-    from trl import SFTTrainer
+    from trl import SFTTrainer, SFTConfig
 
     device_mode = cfg["device_mode"]
     train_cfg   = cfg["training"]
