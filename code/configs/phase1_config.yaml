@@ -141,7 +141,7 @@ qlora:                       # used only in "colab" device_mode
 
 # ── Training (SFTConfig) ──────────────────────────────────────────────────────
 training:
-  num_train_epochs:              3
+  num_train_epochs:              2
   per_device_train_batch_size:   4
   gradient_accumulation_steps:   4        # effective batch size = 16
   learning_rate:                 5.0e-5
