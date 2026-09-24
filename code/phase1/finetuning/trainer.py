@@ -106,6 +106,22 @@ def run_finetuning(
         model.print_trainable_parameters()
 
     train_ds = load_dataset("json", data_files=train_path, split="train")
+    logger.info(
+        "[trainer] Dataset columns: "
+        f"{train_ds.column_names}"
+    )
+
+    if "prompt" not in train_ds.column_names:
+        raise ValueError(
+            "Training dataset is missing 'prompt'. "
+            "Rebuild dataset.py output."
+        )
+
+    if "completion" not in train_ds.column_names:
+        raise ValueError(
+            "Training dataset is missing 'completion'. "
+            "Rebuild dataset.py output."
+        )
     val_ds   = load_dataset("json", data_files=val_path,   split="train")
     logger.info(f"[trainer] Train: {len(train_ds)} | Val: {len(val_ds)} examples")
 
