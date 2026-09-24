@@ -156,7 +156,7 @@ def run_finetuning(
     if device_mode == "local_cpu":
         training_kwargs["use_cpu"] = True
 
-    training_args = _safe_training_args(training_kwargs)
+    training_args = _safe_sft_config(training_kwargs)
     trainer       = _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg)
 
     logger.info("[trainer] Starting training ...")
