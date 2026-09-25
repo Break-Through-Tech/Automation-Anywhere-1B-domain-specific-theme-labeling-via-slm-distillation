@@ -17,12 +17,12 @@ seed: 42
 # ── Pipeline steps to run ────────────────────────────────────────────────────
 # Set any step to false to skip it (useful for re-running specific steps).
 pipeline:
-  run_clustering:       false   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
-  run_preprocessing:    false   # Group by cluster, select top-k, save grouped CSV
-  run_label_generation: false   # Call frontier LLM, generate 5 labels per cluster
-  run_finetuning:       false   # QLoRA / LoRA fine-tune the student SLM
-  run_baseline_eval:    false   # Evaluate vanilla (pre-distillation) SLM
-  run_finetuned_eval:   false   # Evaluate fine-tuned SLM
+  run_clustering:       true   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
+  run_preprocessing:    true   # Group by cluster, select top-k, save grouped CSV
+  run_label_generation: true   # Call frontier LLM, generate 5 labels per cluster
+  run_finetuning:       true   # QLoRA / LoRA fine-tune the student SLM
+  run_baseline_eval:    true   # Evaluate vanilla (pre-distillation) SLM
+  run_finetuned_eval:   true   # Evaluate fine-tuned SLM
   run_llm_judge:        true   # LLM-as-judge evaluation (Claude Haiku)
   run_business_eval:    true   # Latency, cost, throughput metrics
 
@@ -167,7 +167,7 @@ evaluation:
   # Set to the run directory path to skip all training and run only evaluations.
   # Example: "outputs/20260819_2347_SmolLM2-1.7B-Instruct_ep6"
   # Leave null for a normal training + evaluation run.
-  existing_run_dir: "runs/llama_3.2_3b/llama32_default_raw/20260922_2338_Llama-3.2-3B-Instruct_ep3"
+  existing_run_dir: null
 
   # ── Which clusters to run SLM inference on ────────────────────────────────
   # false (default) — inference only on TEST clusters. Faster; produces 3–5
