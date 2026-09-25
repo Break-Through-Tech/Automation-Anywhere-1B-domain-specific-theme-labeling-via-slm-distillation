@@ -1,0 +1,9 @@
+{
+  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+  "device_mode": "colab",
+  "total_epochs": 3,
+  "teacher_mean_latency_s": 0.72,
+  "teacher_estimated_cost_usd": 0.0137,
+  "baseline_inference_speed_s": 0.799,
+  "finetuned_inference_speed_s": 0.733
+}

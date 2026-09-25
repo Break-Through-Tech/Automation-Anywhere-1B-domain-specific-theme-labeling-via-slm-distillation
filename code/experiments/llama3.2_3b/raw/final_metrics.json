@@ -1,0 +1,48 @@
+{
+  "non_llm": {
+    "teacher": {
+      "cosine_sim_same": 1.000000038743019,
+      "cosine_sim_multi": 1.000000038743019,
+      "rouge_l_same": 1.0,
+      "rouge_l_multi": 1.0,
+      "bertscore_f1_same": 1.000000011920929,
+      "bertscore_f1_multi": 1.000000011920929
+    },
+    "baseline": {
+      "cosine_sim_same": 0.8044434428215027,
+      "cosine_sim_multi": 0.8585909575223922,
+      "rouge_l_same": 0.442853863113151,
+      "rouge_l_multi": 0.5399556725524219,
+      "bertscore_f1_same": 0.9096162766218184,
+      "bertscore_f1_multi": 0.9231850653886796
+    },
+    "finetuned": {
+      "cosine_sim_same": 0.8160032838582992,
+      "cosine_sim_multi": 0.8813065499067306,
+      "rouge_l_same": 0.4442003661972704,
+      "rouge_l_multi": 0.5639762198585729,
+      "bertscore_f1_same": 0.9078636437654496,
+      "bertscore_f1_multi": 0.9282339960336684
+    }
+  },
+  "llm_judge": {
+    "teacher": {
+      "faithfulness": 5.0,
+      "specificity": 5.0,
+      "equivalence": 5.0,
+      "composite": 5.0
+    },
+    "baseline": {
+      "faithfulness": 4.35,
+      "specificity": 3.5,
+      "equivalence": 3.4,
+      "composite": 3.75
+    },
+    "finetuned": {
+      "faithfulness": 4.5,
+      "specificity": 3.5,
+      "equivalence": 3.6,
+      "composite": 3.866666666666666
+    }
+  }
+}
