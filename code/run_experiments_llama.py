@@ -39,16 +39,18 @@ BASELINE = {
     "alpha":            16,
     "dropout":          0.05,
     "warmup_ratio":     0.05,
+    "warmup_steps":     None,   # None = baseline derives warmup from warmup_ratio
 }
 
 # ── Sweep definitions: (param_name, [alternate values to try]) ───────────────
 # Each value here generates ONE experiment that changes only that field.
 SWEEPS = [
-    ("lr",           [1.0e-4, 4.0e-4]),   # wide bracket — strongest lever per prior evidence
+    ("lr",           [1.0e-4, 4.0e-4]),
     ("epochs",       [2, 5]),
-    ("r_alpha",      [32]),               # r and alpha move together, kept at 1:1 ratio
+    ("r_alpha",      [32]),
     ("dropout",      [0.0]),
-    ("warmup_ratio", [0.10]),
+    ("warmup_steps", [0, 15]),   # explicit steps, not ratio — guarantees
+                                 # separation at small step counts (see trainer.py)
 ]
 
 
@@ -159,6 +161,7 @@ def main():
         cfg["training"]["learning_rate"]        = exp["lr"]
         cfg["training"]["num_train_epochs"]     = exp["epochs"]
         cfg["training"]["warmup_ratio"]         = exp["warmup_ratio"]
+        cfg["training"]["warmup_steps"]         = exp.get("warmup_steps")  # None → derive from ratio
         cfg["training"]["completion_only_loss"] = True   # constant across the whole sweep
         cfg["lora"]["r"]                        = exp["r"]
         cfg["lora"]["lora_alpha"]               = exp["alpha"]
@@ -230,7 +233,7 @@ def _build_comparison_table(dest_split: Path) -> None:
     baseline_params = {"lr": BASELINE["lr"], "epochs": BASELINE["epochs"],
                         "r": BASELINE["r"], "alpha": BASELINE["alpha"],
                         "dropout": BASELINE["dropout"],
-                        "warmup_ratio": BASELINE["warmup_ratio"]}
+                        "warmup_ratio": BASELINE["warmup_ratio"], "warmup_steps": BASELINE["warmup_steps"]}
 
     for exp in EXPERIMENTS:
         name = exp["name"]
