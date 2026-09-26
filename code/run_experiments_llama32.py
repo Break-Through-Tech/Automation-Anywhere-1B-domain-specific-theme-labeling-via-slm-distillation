@@ -9,7 +9,19 @@ Baseline ("baseline_v2") = current llama_3.2_3b.yaml as-is:
 
 Each sweep experiment changes exactly ONE field from baseline_v2 — nothing else.
 Run this on raw first. Once you've picked a winning config, re-run this same
-script with USE_CLEAN=True (or duplicate it) to confirm on the clean split.
+script with the clean-split dataset path swapped in to confirm.
+
+Completion / resume semantics
+------------------------------
+An experiment is only skipped as "already done" if the FINAL adapter save
+exists at <run_out>/models/lora_adapter/adapter_model.safetensors — the
+location trainer.py writes to via trainer.save_model() at the very end of
+run_finetuning(). This deliberately does NOT check intermediate
+checkpoint-N/ subdirectories (save_strategy='epoch' writes adapter weights
+into those too), because a crashed run that only reached checkpoint-1/ would
+otherwise be mistaken for complete and skipped forever — discarding the
+partially-trained run instead of letting trainer.py's
+resume_from_checkpoint logic pick it back up.
 """
 
 import gc
@@ -46,11 +58,11 @@ BASELINE = {
 # Each value here generates ONE experiment that changes only that field.
 SWEEPS = [
     ("lr",           [1.0e-4, 4.0e-4]),
-    ("epochs",       [2, 5]),
-    ("r_alpha",      [32]),
+    ("epochs",       [5]),
+    ("r_alpha",      [32]),               # r and alpha move together, kept at 1:1 ratio
     ("dropout",      [0.0]),
-    ("warmup_steps", [0, 15]),   # explicit steps, not ratio — guarantees
-                                 # separation at small step counts (see trainer.py)
+    ("warmup_steps", [15]),            # explicit steps, not ratio — guarantees
+                                           # separation at small step counts
 ]
 
 
@@ -99,18 +111,25 @@ def find_latest_dir(parent: Path, since_ts: float):
 
 def already_completed(run_out: Path) -> bool:
     """
-    An experiment is 'done' only if the LoRA adapter weights were actually
-    written to disk — not merely if judge_summary.csv landed in dest_split.
-    Judge scoring or the file-copy step can fail even after a fully successful
-    fine-tune; checking for the eval CSV alone would cause a full retrain on
-    restart, silently discarding a completed training run.
+    An experiment is fully done only if the FINAL adapter save exists directly
+    in <run_out>/models/lora_adapter/ — not in a checkpoint-N/ subfolder.
+
+    trainer.py's models_out path is cfg["paths"]["models_out"] + "/lora_adapter",
+    and this script sets cfg["paths"]["models_out"] = run_out/"models", so the
+    final save lands at run_out/models/lora_adapter/adapter_model.safetensors.
+
+    Using rglob() here would also match weights inside checkpoint-N/
+    subdirectories (save_strategy='epoch' writes full adapter weights into
+    those too), which would mistake a crashed, partially-trained run — e.g.
+    one that only reached checkpoint-1/ of 3 — for a completed one and skip
+    it forever on restart, silently keeping an undertrained model instead of
+    resuming it via trainer.py's checkpoint-resume logic.
     """
-    if not run_out.exists():
+    adapter_dir = run_out / "models" / "lora_adapter"
+    if not adapter_dir.exists():
         return False
-    for pattern in ("adapter_model.safetensors", "adapter_model.bin"):
-        if any(run_out.rglob(pattern)):
-            return True
-    return False
+    return (adapter_dir / "adapter_model.safetensors").exists() or \
+           (adapter_dir / "adapter_model.bin").exists()
 
 
 def main():
@@ -127,28 +146,29 @@ def main():
         print(f"  - {e['name']}")
 
     for exp in EXPERIMENTS:
-        name = exp["name"]
+        name    = exp["name"]
         run_out = RUNS_BASE / name / "outputs"
 
         if already_completed(run_out):
-            print(f"\n[SKIP] {name} — adapter weights already exist at {run_out}.")
+            print(f"\n[SKIP] {name} — final adapter weights already exist at "
+                  f"{run_out / 'models' / 'lora_adapter'}.")
             continue
 
         print("\n" + "=" * 75)
         print(f"[EXECUTING]: {name}  |  lr={exp['lr']}  epochs={exp['epochs']}  "
               f"r={exp['r']}  alpha={exp['alpha']}  dropout={exp['dropout']}  "
-              f"warmup_steps={exp.get('warmup_steps')}")
+              f"warmup_steps={exp.get('warmup_steps')}  warmup_ratio={exp['warmup_ratio']}")
         print("=" * 75)
 
         clear_vram()
-        run_out = RUNS_BASE / name / "outputs"
-        cfg = yaml.safe_load(yaml.dump(base_cfg))  # deep copy
+        cfg = yaml.safe_load(yaml.dump(base_cfg))  # deep copy — original file untouched
 
         # Fixed dataset — raw split, n_samples stays 500 throughout the sweep
-        cfg["dataset"]["name"]       = RAW_DATASET
-        cfg["dataset"]["n_samples"]  = 500
+        cfg["dataset"]["name"]      = RAW_DATASET
+        cfg["dataset"]["n_samples"] = 500
 
-        # Reuse existing clustered/labeled data — don't reprocess per experiment
+        # Isolated output tree — completely separate from the original
+        # baseline's runs/llama_3.2_3b/llama32_default_raw/ path
         cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_raw"
         cfg["paths"]["checkpoints"]    = f"{{drive_root}}/runs/llama_3.2_3b_sweep_raw/{name}/checkpoints"
         cfg["paths"]["outputs"]        = str(run_out)
@@ -167,6 +187,13 @@ def main():
         cfg["lora"]["lora_alpha"]               = exp["alpha"]
         cfg["lora"]["lora_dropout"]             = exp["dropout"]
 
+        # Force a real train+eval run for THIS experiment's own config.
+        # The base yaml's existing_run_dir points at the ORIGINAL baseline
+        # (20260925_0237_Llama-3.2-3B-Instruct_ep3); left unset, every sweep
+        # experiment would inherit that path and could skip training,
+        # silently re-evaluating the old baseline instead of its own config.
+        cfg["evaluation"]["existing_run_dir"] = None
+
         # Data already clustered/labeled for raw n=500 — skip those pipeline stages
         has_labeled = (DRIVE_ROOT / "data/processed_raw/bitext_labeled.csv").exists()
         cfg["pipeline"]["run_clustering"]       = False
@@ -174,7 +201,6 @@ def main():
         cfg["pipeline"]["run_label_generation"] = not has_labeled
 
         # Leave judge_llm.n_samples untouched (50) — isolation test, no eval-noise change
-        # cfg["evaluation"]["judge_llm"]["n_samples"] stays whatever's in the base config
 
         trial_cfg_path = CODE_DIR / f"configs/{name}.yaml"
         with open(trial_cfg_path, "w") as f:
@@ -188,10 +214,11 @@ def main():
             [sys.executable, str(CODE_DIR / "main.py"),
              "--phase", "1", "--config", str(trial_cfg_path),
              "--device_mode", "colab"],
-            # NOTE: --no_checkpoints intentionally omitted — pipeline stages are
-            # already skipped above via cfg["pipeline"], and omitting it lets
-            # trainer.py's resume-from-checkpoint logic (if you added the patch)
-            # pick up a partially-finished run after a Colab disconnect.
+            # NOTE: --no_checkpoints intentionally omitted. Pipeline stages
+            # (clustering/preprocessing/labeling) are already skipped above
+            # via cfg["pipeline"], and omitting this flag lets trainer.py's
+            # resume_from_checkpoint logic pick up a partially-finished run
+            # after a Colab disconnect instead of retraining from scratch.
             cwd=str(CODE_DIR),
             env=env,
             capture_output=True,
@@ -203,7 +230,8 @@ def main():
         if res.returncode != 0:
             print(f"[ERROR] Trial '{name}' failed:\n{res.stderr[-2000:]}")
             print(f"        Rerun the script — completed experiments will be "
-                  f"skipped, and this one will pick up from its last checkpoint.")
+                  f"skipped, and this one will resume from its last checkpoint "
+                  f"(trainer.py) rather than retraining from scratch.")
             continue
 
         run_dir = find_latest_dir(run_out, start_ts)
@@ -230,39 +258,47 @@ def _build_comparison_table(dest_split: Path) -> None:
     """Collect every experiment's finetuned composite score into one CSV,
     tagged with which single parameter changed vs. baseline_v2."""
     rows = []
-    baseline_params = {"lr": BASELINE["lr"], "epochs": BASELINE["epochs"],
-                        "r": BASELINE["r"], "alpha": BASELINE["alpha"],
-                        "dropout": BASELINE["dropout"],
-                        "warmup_ratio": BASELINE["warmup_ratio"], "warmup_steps": BASELINE["warmup_steps"]}
+    baseline_params = {
+        "lr":           BASELINE["lr"],
+        "epochs":       BASELINE["epochs"],
+        "r":            BASELINE["r"],
+        "alpha":        BASELINE["alpha"],
+        "dropout":      BASELINE["dropout"],
+        "warmup_ratio": BASELINE["warmup_ratio"],
+        "warmup_steps": BASELINE["warmup_steps"],
+    }
 
     for exp in EXPERIMENTS:
-        name = exp["name"]
+        name       = exp["name"]
         judge_path = dest_split / f"{name}_judge_summary.csv"
         if not judge_path.exists():
             continue
-        df = pd.read_csv(judge_path)
+        df     = pd.read_csv(judge_path)
         ft_row = df[df["model"] == "finetuned"]
         if ft_row.empty:
             continue
 
         # Identify which single field differs from baseline (blank for baseline itself)
-        changed = [k for k in baseline_params
-                   if exp.get(k if k != "alpha" else "alpha") != baseline_params[k]]
-        varied = ", ".join(changed) if changed else "baseline_v2"
+        changed = [k for k in baseline_params if exp.get(k) != baseline_params[k]]
+        varied  = ", ".join(changed) if changed else "baseline_v2"
 
         row = ft_row.iloc[0].to_dict()
-        row["experiment"] = name
+        row["experiment"]   = name
         row["varied_param"] = varied
-        row["lr"] = exp["lr"]; row["epochs"] = exp["epochs"]
-        row["r"] = exp["r"]; row["alpha"] = exp["alpha"]
-        row["dropout"] = exp["dropout"]; row["warmup_ratio"] = exp["warmup_ratio"]
+        row["lr"]           = exp["lr"]
+        row["epochs"]       = exp["epochs"]
+        row["r"]            = exp["r"]
+        row["alpha"]        = exp["alpha"]
+        row["dropout"]      = exp["dropout"]
+        row["warmup_ratio"] = exp["warmup_ratio"]
+        row["warmup_steps"] = exp.get("warmup_steps")
         rows.append(row)
 
     if not rows:
         print("[WARNING] No completed experiments found for comparison table.")
         return
 
-    comp_df = pd.DataFrame(rows).sort_values("composite", ascending=False)
+    comp_df  = pd.DataFrame(rows).sort_values("composite", ascending=False)
     out_path = dest_split / "comparison_raw.csv"
     comp_df.to_csv(out_path, index=False)
     print(f"\nRanked comparison → {out_path}")
