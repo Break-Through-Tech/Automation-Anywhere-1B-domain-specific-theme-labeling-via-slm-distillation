@@ -78,8 +78,7 @@ def run_finetuning(
     """
     from datasets import load_dataset
     from peft import get_peft_model, LoraConfig, TaskType
-    from transformers import TrainingArguments
-    from trl import SFTTrainer
+    from trl import SFTTrainer, SFTConfig
 
     device_mode = cfg["device_mode"]
     train_cfg   = cfg["training"]
@@ -124,7 +123,7 @@ def run_finetuning(
     warmup_steps = max(0, int(train_cfg["warmup_ratio"] * steps_per_epoch
                                * train_cfg["num_train_epochs"]))
 
-    training_kwargs = dict(
+    sft_config_kwargs = dict(
         output_dir=str(out_dir),
         num_train_epochs=train_cfg["num_train_epochs"],
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
@@ -132,8 +131,8 @@ def run_finetuning(
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
         learning_rate=train_cfg["learning_rate"],
         lr_scheduler_type=train_cfg["lr_scheduler_type"],
-        warmup_ratio=train_cfg["warmup_ratio"],  # removed by _safe_training_args if rejected
-        warmup_steps=warmup_steps,               # fallback if warmup_ratio rejected
+        warmup_ratio=train_cfg["warmup_ratio"],
+        warmup_steps=warmup_steps,
         bf16=use_bf16,
         fp16=use_fp16,
         gradient_checkpointing=train_cfg["gradient_checkpointing"],
@@ -144,11 +143,13 @@ def run_finetuning(
         load_best_model_at_end=train_cfg["load_best_model_at_end"],
         metric_for_best_model=train_cfg["metric_for_best_model"],
         report_to="none",
+        max_seq_length=cfg["student_slm"]["max_seq_length"],
+        completion_only_loss=True,  # ← Instruction-tuning loss mask
     )
     if device_mode == "local_cpu":
-        training_kwargs["use_cpu"] = True
+        sft_config_kwargs["use_cpu"] = True
 
-    training_args = _safe_training_args(training_kwargs)
+    training_args = _safe_sft_config(sft_config_kwargs)
     trainer       = _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg)
 
     logger.info("[trainer] Starting training ...")
@@ -289,7 +290,6 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
     """
     from trl import SFTTrainer
 
-    max_seq_len    = cfg["student_slm"]["max_seq_length"]
     tokenizer_keys = ["processing_class", "tokenizer"]
 
     for tok_key in tokenizer_keys:
@@ -299,8 +299,6 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
             "train_dataset":      train_ds,
             "eval_dataset":       val_ds,
             "args":               training_args,
-            "max_seq_length":     max_seq_len,
-            "dataset_text_field": "text",
         }
         for _ in range(len(kwargs) + 1):
             try:
@@ -327,35 +325,33 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
 
 # ── Private: safe TrainingArguments builder ───────────────────────────────────
 
-def _safe_training_args(training_kwargs: dict):
+def _safe_sft_config(sft_kwargs: dict):
     """
-    Build TrainingArguments, removing any param the installed version rejects.
-
-    Handles:
-    - Python 3.14 dataclass __init__ changes (e.g. warmup_ratio rejected)
-    - transformers 5.x param renames
-    - warmup_ratio → warmup_steps fallback (both included; ratio removed if rejected)
+    Build SFTConfig, removing any param the installed trl version rejects.
     """
-    from transformers import TrainingArguments
+    from trl import SFTConfig
 
-    kwargs   = dict(training_kwargs)
+    kwargs   = dict(sft_kwargs)
     max_iter = len(kwargs) + 1
 
     for _ in range(max_iter):
         try:
-            return TrainingArguments(**kwargs)
+            return SFTConfig(**kwargs)
         except TypeError as exc:
             match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
             if not match:
                 raise
             bad = match.group(1)
-            logger.warning(
-                f"[trainer] TrainingArguments rejected '{bad}' "
-                f"(transformers {_ver('transformers')}) — removing."
-            )
+            if bad == "completion_only_loss":
+                logger.warning(
+                    "[trainer] Installed TRL version does not support "
+                    "'completion_only_loss' — please upgrade trl (pip install -U trl)."
+                )
+            else:
+                logger.warning(f"[trainer] SFTConfig rejected '{bad}' — removing.")
             kwargs.pop(bad, None)
 
-    raise RuntimeError("[trainer] Could not build TrainingArguments.")
+    raise RuntimeError("[trainer] Could not build SFTConfig.")
 
 
 # ── Private: target-modules resolver ─────────────────────────────────────────
