@@ -43,6 +43,9 @@ DRIVE_ROOT   = Path("/content/drive/MyDrive/slm-distillation")
 RUNS_BASE    = DRIVE_ROOT / "runs/llama_3.2_3b_sweep_raw"
 RAW_DATASET  = "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
 
+# Absolute path mapping to prevent local relative path lookup errors
+DRIVE_PROCESSED_RAW = DRIVE_ROOT / "data/processed_raw"
+
 # ── Baseline (fixed point every sweep experiment deviates from by ONE field) ──
 BASELINE = {
     "lr":               2.0e-4,
@@ -59,9 +62,9 @@ BASELINE = {
 SWEEPS = [
     ("lr",           [1.0e-4, 4.0e-4]),
     ("epochs",       [5]),
-    ("r_alpha",      [32]),               # r and alpha move together, kept at 1:1 ratio
+    ("r_alpha",      [32]),                # r and alpha move together, kept at 1:1 ratio
     ("dropout",      [0.0]),
-    ("warmup_steps", [15]),            # explicit steps, not ratio — guarantees
+    ("warmup_steps", [15]),                # explicit steps, not ratio — guarantees
                                            # separation at small step counts
 ]
 
@@ -113,17 +116,6 @@ def already_completed(run_out: Path) -> bool:
     """
     An experiment is fully done only if the FINAL adapter save exists directly
     in <run_out>/models/lora_adapter/ — not in a checkpoint-N/ subfolder.
-
-    trainer.py's models_out path is cfg["paths"]["models_out"] + "/lora_adapter",
-    and this script sets cfg["paths"]["models_out"] = run_out/"models", so the
-    final save lands at run_out/models/lora_adapter/adapter_model.safetensors.
-
-    Using rglob() here would also match weights inside checkpoint-N/
-    subdirectories (save_strategy='epoch' writes full adapter weights into
-    those too), which would mistake a crashed, partially-trained run — e.g.
-    one that only reached checkpoint-1/ of 3 — for a completed one and skip
-    it forever on restart, silently keeping an undertrained model instead of
-    resuming it via trainer.py's checkpoint-resume logic.
     """
     adapter_dir = run_out / "models" / "lora_adapter"
     if not adapter_dir.exists():
@@ -167,10 +159,9 @@ def main():
         cfg["dataset"]["name"]      = RAW_DATASET
         cfg["dataset"]["n_samples"] = 500
 
-        # Isolated output tree — completely separate from the original
-        # baseline's runs/llama_3.2_3b/llama32_default_raw/ path
-        cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_raw"
-        cfg["paths"]["checkpoints"]    = f"{{drive_root}}/runs/llama_3.2_3b_sweep_raw/{name}/checkpoints"
+        # Fixed Absolute Path pointing directly to Drive processed files
+        cfg["paths"]["data_processed"] = str(DRIVE_PROCESSED_RAW)
+        cfg["paths"]["checkpoints"]    = f"{DRIVE_ROOT}/runs/llama_3.2_3b_sweep_raw/{name}/checkpoints"
         cfg["paths"]["outputs"]        = str(run_out)
         cfg["paths"]["labels_out"]     = str(run_out / "labels")
         cfg["paths"]["models_out"]     = str(run_out / "models")
@@ -188,19 +179,13 @@ def main():
         cfg["lora"]["lora_dropout"]             = exp["dropout"]
 
         # Force a real train+eval run for THIS experiment's own config.
-        # The base yaml's existing_run_dir points at the ORIGINAL baseline
-        # (20260925_0237_Llama-3.2-3B-Instruct_ep3); left unset, every sweep
-        # experiment would inherit that path and could skip training,
-        # silently re-evaluating the old baseline instead of its own config.
         cfg["evaluation"]["existing_run_dir"] = None
 
-        # Data already clustered/labeled for raw n=500 — skip those pipeline stages
-        has_labeled = (DRIVE_ROOT / "data/processed_raw/bitext_labeled.csv").exists()
+        # Data already clustered/labeled for raw n=500 — safely skip those pipeline stages
+        has_labeled = (DRIVE_PROCESSED_RAW / "bitext_labeled.csv").exists()
         cfg["pipeline"]["run_clustering"]       = False
         cfg["pipeline"]["run_preprocessing"]    = False
         cfg["pipeline"]["run_label_generation"] = not has_labeled
-
-        # Leave judge_llm.n_samples untouched (50) — isolation test, no eval-noise change
 
         trial_cfg_path = CODE_DIR / f"configs/{name}.yaml"
         with open(trial_cfg_path, "w") as f:
@@ -214,11 +199,6 @@ def main():
             [sys.executable, str(CODE_DIR / "main.py"),
              "--phase", "1", "--config", str(trial_cfg_path),
              "--device_mode", "colab"],
-            # NOTE: --no_checkpoints intentionally omitted. Pipeline stages
-            # (clustering/preprocessing/labeling) are already skipped above
-            # via cfg["pipeline"], and omitting this flag lets trainer.py's
-            # resume_from_checkpoint logic pick up a partially-finished run
-            # after a Colab disconnect instead of retraining from scratch.
             cwd=str(CODE_DIR),
             env=env,
             capture_output=True,
