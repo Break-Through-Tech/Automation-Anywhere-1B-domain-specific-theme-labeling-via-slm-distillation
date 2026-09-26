@@ -168,28 +168,28 @@ def _build_examples(
             label    = labels[prompt_id]
             messages = build_messages(prompt_id, ticket_texts, cfg, domain)
 
-            # Append the assistant turn (the gold label) for training
-            full_messages = messages + [{"role": "assistant", "content": label}]
-
-            # Apply model's chat template
-            text = tokenizer.apply_chat_template(
-                full_messages,
+            # Prompt: system + user, with generation prompt appended (no label yet)
+            prompt_text = tokenizer.apply_chat_template(
+                messages,
                 tokenize=False,
-                add_generation_prompt=False,
+                add_generation_prompt=True,
             )
+            # Completion: just the label text (+ eos so the model learns to stop)
+            completion_text = label + tokenizer.eos_token
 
             # Length check (skip if too long)
-            token_len = len(tokenizer.encode(text))
+            token_len = len(tokenizer.encode(prompt_text + completion_text))
             if token_len > max_seq:
                 skipped += 1
                 continue
 
             examples.append({
-                "text":       text,
+                "prompt":     prompt_text,
+                "completion": completion_text,
                 "cluster_id": int(cid),
                 "prompt_id":  prompt_id,
             })
-
+            
     if skipped > 0:
         logger.warning(
             f"[dataset] Skipped {skipped} examples exceeding max_seq_length={max_seq}."
