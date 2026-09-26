@@ -100,7 +100,7 @@ prompts:
     cluster from others, and be 5-15 words long.
     Return only the label — no explanation, no punctuation at the end, no quotes.
 
-  include_domain_in_prompt: false                  # set to true in Phase 2
+  include_domain_in_prompt: true                  # set to true in Phase 2
 
   P1: "Generate a concise label (5-15 words) for this cluster of support tickets.\n\n{tickets}"
   P2: "What is the primary issue described in these support tickets? Answer in one short phrase.\n\n{tickets}"
@@ -132,7 +132,7 @@ lora:
   task_type:       "CAUSAL_LM"
 
 qlora:                       # used only in "colab" device_mode
-  load_in_4bit:        true
+  load_in_4bit:        false # default = true, 3B fits bf16 on T4
   bnb_4bit_quant_type: "nf4"
   use_double_quant:    true
 
