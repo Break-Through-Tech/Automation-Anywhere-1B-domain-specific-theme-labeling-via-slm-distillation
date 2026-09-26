@@ -11,12 +11,18 @@ local_cpu  : CPU + LoRA in float32 (smoke test only — very slow).
 
 Version compatibility handled internally
 ----------------------------------------
-- TrainingArguments: _safe_training_args() removes any param rejected by the
-  installed transformers version (e.g. warmup_ratio in Python 3.14 / tf 5.x).
+- SFTConfig: _safe_sft_config() removes any param rejected by the installed
+  trl version (e.g. completion_only_loss on older trl).
 - SFTTrainer: _build_sft_trainer() tries 'processing_class' then 'tokenizer'
   to handle the trl >= 0.15 rename.
 - LoRA target_modules: _resolve_target_modules() converts "all-linear" to an
   explicit layer list, avoiding PEFT versions that iterate the string as chars.
+
+Resume safety
+-------------
+_find_last_checkpoint() checks output_dir for an existing checkpoint-N/ before
+training starts. If found, trainer.train(resume_from_checkpoint=...) picks up
+from there instead of restarting — protects against Colab disconnects.
 """
 
 import logging
@@ -26,6 +32,7 @@ import time
 from pathlib import Path
 
 import torch
+from transformers.trainer_utils import get_last_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +67,21 @@ def load_model_and_tokenizer(cfg: dict):
     _configure_tokenizer(tokenizer, model)
     logger.info(f"[trainer] Model loaded. Trainable params: {_count_trainable(model):,}")
     return model, tokenizer
+
+
+# ── Checkpoints ────────────────────────────────────────────────────────────────
+
+def _find_last_checkpoint(out_dir: Path):
+    """Return the path to the latest checkpoint-N dir if one exists, else None."""
+    if out_dir.exists() and any(out_dir.glob("checkpoint-*")):
+        try:
+            ckpt = get_last_checkpoint(str(out_dir))
+            if ckpt:
+                logger.info(f"[trainer] Found existing checkpoint: {ckpt}")
+            return ckpt
+        except Exception as e:
+            logger.warning(f"[trainer] Could not resolve last checkpoint: {e}")
+    return None
 
 
 # ── Public: train ─────────────────────────────────────────────────────────────
@@ -109,7 +131,7 @@ def run_finetuning(
     val_ds   = load_dataset("json", data_files=val_path,   split="train")
     logger.info(f"[trainer] Train: {len(train_ds)} | Val: {len(val_ds)} examples")
 
-    # Build TrainingArguments via the self-healing builder (handles version diffs)
+    # Build SFTConfig via the self-healing builder (handles version diffs)
     use_bf16 = train_cfg["bf16"] and _supports_bf16(device_mode)
     use_fp16 = train_cfg["fp16"] and not use_bf16
 
@@ -120,8 +142,29 @@ def run_finetuning(
             * train_cfg["gradient_accumulation_steps"]
         ),
     )
-    warmup_steps = max(0, int(train_cfg["warmup_ratio"] * steps_per_epoch
-                               * train_cfg["num_train_epochs"]))
+
+    # ── Warmup resolution ──────────────────────────────────────────────────────
+    # Explicit warmup_steps (when set) always wins over warmup_ratio. This
+    # matters for isolation sweeps at small data scale: a warmup_ratio delta
+    # (e.g. 0.05 vs 0.10) can round to the SAME integer step count when
+    # steps_per_epoch is small, silently collapsing the sweep into a no-op.
+    # Setting warmup_steps explicitly guarantees separation between conditions.
+    if train_cfg.get("warmup_steps") is not None:
+        warmup_steps = int(train_cfg["warmup_steps"])
+        logger.info(
+            f"[trainer] Using explicit warmup_steps={warmup_steps} "
+            f"(overriding warmup_ratio)."
+        )
+    else:
+        warmup_steps = max(
+            0,
+            int(train_cfg["warmup_ratio"] * steps_per_epoch * train_cfg["num_train_epochs"]),
+        )
+        logger.info(
+            f"[trainer] Computed warmup_steps={warmup_steps} "
+            f"from warmup_ratio={train_cfg['warmup_ratio']} "
+            f"({steps_per_epoch} steps/epoch × {train_cfg['num_train_epochs']} epochs)."
+        )
 
     sft_config_kwargs = dict(
         output_dir=str(out_dir),
@@ -144,7 +187,10 @@ def run_finetuning(
         metric_for_best_model=train_cfg["metric_for_best_model"],
         report_to="none",
         max_seq_length=cfg["student_slm"]["max_seq_length"],
-        completion_only_loss=True,  # ← Instruction-tuning loss mask
+        # Config-driven (defaults True) rather than hardcoded, so a future
+        # "with vs. without completion_only_loss" ablation is a one-line
+        # config change instead of a code edit.
+        completion_only_loss=train_cfg.get("completion_only_loss", True),
     )
     if device_mode == "local_cpu":
         sft_config_kwargs["use_cpu"] = True
@@ -154,7 +200,10 @@ def run_finetuning(
 
     logger.info("[trainer] Starting training ...")
     t0 = time.time()
-    trainer.train()
+    resume_ckpt = _find_last_checkpoint(out_dir)
+    if resume_ckpt:
+        logger.info(f"[trainer] Resuming from {resume_ckpt}")
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     elapsed = time.time() - t0
 
     if business_eval is not None:
@@ -204,7 +253,7 @@ def generate_label(
 # ── Private: device-specific model loaders ────────────────────────────────────
 
 def _load_colab(model_id: str, cfg: dict):
-    """QLoRA with 4-bit NF4 quantisation. Tries Unsloth first, falls back to PEFT."""
+    """QLoRA with 4-bit NF4 quantisation (or bf16 if load_in_4bit=False). Tries Unsloth first."""
     from transformers import AutoTokenizer
 
     qlora_cfg      = cfg["qlora"]
@@ -235,15 +284,20 @@ def _load_colab(model_id: str, cfg: dict):
 
     from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=qlora_cfg["load_in_4bit"],
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=qlora_cfg["use_double_quant"],
-    )
-    model     = AutoModelForCausalLM.from_pretrained(
-        model_id, quantization_config=bnb_config, device_map="auto"
-    )
+    if qlora_cfg["load_in_4bit"]:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=qlora_cfg["use_double_quant"],
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, quantization_config=bnb_config, device_map="auto"
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        )
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     return model, tokenizer
 
@@ -282,8 +336,10 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
     """
     Build SFTTrainer handling both old and new trl / transformers APIs.
 
-    trl < 0.15  : SFTTrainer(tokenizer=..., max_seq_length=..., dataset_text_field=...)
-    trl >= 0.15 : 'tokenizer' renamed to 'processing_class'
+    trl >= 0.15 : 'tokenizer' renamed to 'processing_class'.
+    dataset_text_field / max_seq_length live on SFTConfig (training_args) now,
+    not here — SFTTrainer auto-detects the prompt/completion columns produced
+    by dataset.py's _build_examples().
 
     Strategy: try 'processing_class' first, fall back to 'tokenizer'.
     Other unexpected kwargs are removed one at a time until the call succeeds.
@@ -294,11 +350,11 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
 
     for tok_key in tokenizer_keys:
         kwargs = {
-            "model":              model,
-            tok_key:              tokenizer,
-            "train_dataset":      train_ds,
-            "eval_dataset":       val_ds,
-            "args":               training_args,
+            "model":         model,
+            tok_key:         tokenizer,
+            "train_dataset": train_ds,
+            "eval_dataset":  val_ds,
+            "args":          training_args,
         }
         for _ in range(len(kwargs) + 1):
             try:
@@ -323,11 +379,14 @@ def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
     )
 
 
-# ── Private: safe TrainingArguments builder ───────────────────────────────────
+# ── Private: safe SFTConfig builder ───────────────────────────────────────────
 
 def _safe_sft_config(sft_kwargs: dict):
     """
     Build SFTConfig, removing any param the installed trl version rejects.
+    Warns loudly if 'completion_only_loss' itself is rejected, since that
+    means the installed TRL is too old to mask the prompt out of the loss —
+    training would silently fall back to full-sequence loss.
     """
     from trl import SFTConfig
 
@@ -345,7 +404,9 @@ def _safe_sft_config(sft_kwargs: dict):
             if bad == "completion_only_loss":
                 logger.warning(
                     "[trainer] Installed TRL version does not support "
-                    "'completion_only_loss' — please upgrade trl (pip install -U trl)."
+                    "'completion_only_loss' — upgrade trl (pip install -U trl) "
+                    "or loss will be computed over the full sequence, not just "
+                    "the label."
                 )
             else:
                 logger.warning(f"[trainer] SFTConfig rejected '{bad}' — removing.")
@@ -388,7 +449,7 @@ def _resolve_target_modules(model_id: str, target_modules_cfg) -> list:
 def _configure_tokenizer(tokenizer, model) -> None:
     """Ensure padding token and right-padding for training."""
     if tokenizer.pad_token is None:
-        tokenizer.pad_token    = tokenizer.eos_token
+        tokenizer.pad_token       = tokenizer.eos_token
         model.config.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "right"
 
