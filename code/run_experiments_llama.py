@@ -1,3 +1,17 @@
+"""
+run_experiments_llama32.py
+
+Isolation sweep for Llama 3.2-3B on the RAW Bitext split, n_samples=500 fixed.
+
+Baseline ("baseline_v2") = current llama_3.2_3b.yaml as-is:
+  completion_only_loss=True, load_in_4bit=False, include_domain_in_prompt=True,
+  lr=2e-4, epochs=3, r=16, alpha=16, dropout=0.05, warmup_ratio=0.05
+
+Each sweep experiment changes exactly ONE field from baseline_v2 — nothing else.
+Run this on raw first. Once you've picked a winning config, re-run this same
+script with USE_CLEAN=True (or duplicate it) to confirm on the clean split.
+"""
+
 import gc
 import os
 import shutil
@@ -5,57 +19,63 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
 import pandas as pd
 import yaml
 
-REPO = Path("/content/project")
-CODE_DIR = REPO / "code"
-CONFIG_BASE = CODE_DIR / "configs/llama_3.2_3b.yaml"
-EXP_DIR = REPO / "experiments/llama_3.2_3b"
-DRIVE_ROOT = Path("/content/drive/MyDrive/slm-distillation")
-RUNS_BASE = DRIVE_ROOT / "runs/llama_3.2_3b"
-CSV_PATH = EXP_DIR / "experiment_comparison_llama32.csv"
+REPO         = Path("/content/project")
+CODE_DIR     = REPO / "code"
+CONFIG_BASE  = CODE_DIR / "configs/llama_3.2_3b.yaml"
+EXP_DIR      = REPO / "experiments/llama_3.2_3b_sweep_raw"
+DRIVE_ROOT   = Path("/content/drive/MyDrive/slm-distillation")
+RUNS_BASE    = DRIVE_ROOT / "runs/llama_3.2_3b_sweep_raw"
+RAW_DATASET  = "bitext/Bitext-customer-support-llm-chatbot-training-dataset"
 
-EXPERIMENTS = [
-    # ── CLEAN DATASET ──
-    {
-        "name": "llama32_clean_default_baseline",
-        "split": "clean",
-        "dataset_name": "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv",
-        "lr": 3.0e-4, "epochs": 3, "r": 16, "alpha": 16
-    },
-    {
-        "name": "llama32_clean_lr_optimal_3.5e-4",
-        "split": "clean",
-        "dataset_name": "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv",
-        "lr": 3.5e-4, "epochs": 3, "r": 32, "alpha": 32
-    },
-    {
-        "name": "llama32_clean_high_capacity_4e-4_ep4",
-        "split": "clean",
-        "dataset_name": "/content/drive/MyDrive/slm-distillation/data/cleaned/bitext_cleaned_support.csv",
-        "lr": 4.0e-4, "epochs": 4, "r": 32, "alpha": 32
-    },
-    # ── RAW DATASET ──
-    {
-        "name": "llama32_raw_default_baseline",
-        "split": "raw",
-        "dataset_name": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
-        "lr": 3.0e-4, "epochs": 3, "r": 16, "alpha": 16
-    },
-    {
-        "name": "llama32_raw_lr_optimal_3.5e-4",
-        "split": "raw",
-        "dataset_name": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
-        "lr": 3.5e-4, "epochs": 3, "r": 32, "alpha": 32
-    },
-    {
-        "name": "llama32_raw_high_capacity_4e-4_ep4",
-        "split": "raw",
-        "dataset_name": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
-        "lr": 4.0e-4, "epochs": 4, "r": 32, "alpha": 32
-    },
+# ── Baseline (fixed point every sweep experiment deviates from by ONE field) ──
+BASELINE = {
+    "lr":               2.0e-4,
+    "epochs":           3,
+    "r":                16,
+    "alpha":            16,
+    "dropout":          0.05,
+    "warmup_ratio":     0.05,
+}
+
+# ── Sweep definitions: (param_name, [alternate values to try]) ───────────────
+# Each value here generates ONE experiment that changes only that field.
+SWEEPS = [
+    ("lr",           [1.0e-4, 4.0e-4]),   # wide bracket — strongest lever per prior evidence
+    ("epochs",       [2, 5]),
+    ("r_alpha",      [32]),               # r and alpha move together, kept at 1:1 ratio
+    ("dropout",      [0.0]),
+    ("warmup_ratio", [0.10]),
 ]
+
+
+def build_experiments():
+    """Build the full experiment list: baseline_v2 first, then one-param sweeps."""
+    experiments = [{
+        "name": "llama32_raw_baseline_v2",
+        **BASELINE,
+    }]
+
+    for param, values in SWEEPS:
+        for v in values:
+            exp = dict(BASELINE)  # copy — everything else stays at baseline
+            if param == "r_alpha":
+                exp["r"], exp["alpha"] = v, v
+                tag = f"r{v}_a{v}"
+            else:
+                exp[param] = v
+                tag = f"{param}{v}"
+            exp["name"] = f"llama32_raw_{tag}"
+            experiments.append(exp)
+
+    return experiments
+
+
+EXPERIMENTS = build_experiments()
+
 
 def clear_vram():
     gc.collect()
@@ -67,69 +87,120 @@ def clear_vram():
     except Exception:
         pass
 
+
 def find_latest_dir(parent: Path, since_ts: float):
     if not parent.exists():
         return None
     dirs = [d for d in parent.iterdir() if d.is_dir() and d.stat().st_mtime >= since_ts]
     return max(dirs, key=lambda d: d.stat().st_mtime) if dirs else None
 
+
+def already_completed(run_out: Path) -> bool:
+    """
+    An experiment is 'done' only if the LoRA adapter weights were actually
+    written to disk — not merely if judge_summary.csv landed in dest_split.
+    Judge scoring or the file-copy step can fail even after a fully successful
+    fine-tune; checking for the eval CSV alone would cause a full retrain on
+    restart, silently discarding a completed training run.
+    """
+    if not run_out.exists():
+        return False
+    for pattern in ("adapter_model.safetensors", "adapter_model.bin"):
+        if any(run_out.rglob(pattern)):
+            return True
+    return False
+
+
 def main():
     EXP_DIR.mkdir(parents=True, exist_ok=True)
+    dest_split = EXP_DIR / "raw"
+    dest_split.mkdir(parents=True, exist_ok=True)
+
     with open(CONFIG_BASE, "r") as f:
         base_cfg = yaml.safe_load(f)
 
+    print(f"\n{len(EXPERIMENTS)} experiments queued (1 baseline + "
+          f"{len(EXPERIMENTS) - 1} isolated sweeps):")
+    for e in EXPERIMENTS:
+        print(f"  - {e['name']}")
+
     for exp in EXPERIMENTS:
         name = exp["name"]
-        split = exp["split"]
+        run_out = RUNS_BASE / name / "outputs"
+
+        if already_completed(run_out):
+            print(f"\n[SKIP] {name} — adapter weights already exist at {run_out}.")
+            continue
+
         print("\n" + "=" * 75)
-        print(f"[EXECUTING]: {name} | Split: {split.upper()} | LR: {exp['lr']} | Epochs: {exp['epochs']}")
+        print(f"[EXECUTING]: {name}  |  lr={exp['lr']}  epochs={exp['epochs']}  "
+              f"r={exp['r']}  alpha={exp['alpha']}  dropout={exp['dropout']}  "
+              f"warmup_steps={exp.get('warmup_steps')}")
         print("=" * 75)
 
         clear_vram()
-        run_out = RUNS_BASE / f"{split}_{name}/outputs"
-        cfg = yaml.safe_load(yaml.dump(base_cfg))
+        run_out = RUNS_BASE / name / "outputs"
+        cfg = yaml.safe_load(yaml.dump(base_cfg))  # deep copy
 
-        # Direct paths
-        cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_{split}"
-        cfg["paths"]["checkpoints"] = f"{{drive_root}}/runs/llama_3.2_3b/{split}_{name}/checkpoints"
-        cfg["paths"]["outputs"] = str(run_out)
-        cfg["paths"]["labels_out"] = str(run_out / "labels")
-        cfg["paths"]["models_out"] = str(run_out / "models")
+        # Fixed dataset — raw split, n_samples stays 500 throughout the sweep
+        cfg["dataset"]["name"]       = RAW_DATASET
+        cfg["dataset"]["n_samples"]  = 500
+
+        # Reuse existing clustered/labeled data — don't reprocess per experiment
+        cfg["paths"]["data_processed"] = f"{{drive_root}}/data/processed_raw"
+        cfg["paths"]["checkpoints"]    = f"{{drive_root}}/runs/llama_3.2_3b_sweep_raw/{name}/checkpoints"
+        cfg["paths"]["outputs"]        = str(run_out)
+        cfg["paths"]["labels_out"]     = str(run_out / "labels")
+        cfg["paths"]["models_out"]     = str(run_out / "models")
         cfg["paths"]["evaluation_out"] = str(run_out / "evaluation")
-        cfg["paths"]["hf_cache"] = "/root/.cache/huggingface"
+        cfg["paths"]["hf_cache"]       = "/root/.cache/huggingface"
 
-        cfg["dataset"]["name"] = exp["dataset_name"]
-        cfg["training"]["learning_rate"] = exp["lr"]
-        cfg["training"]["num_train_epochs"] = exp["epochs"]
-        cfg["lora"]["r"] = exp["r"]
-        cfg["lora"]["lora_alpha"] = exp["alpha"]
+        # Apply this experiment's single deviation from BASELINE
+        cfg["training"]["learning_rate"]        = exp["lr"]
+        cfg["training"]["num_train_epochs"]     = exp["epochs"]
+        cfg["training"]["warmup_ratio"]         = exp["warmup_ratio"]
+        cfg["training"]["completion_only_loss"] = True   # constant across the whole sweep
+        cfg["lora"]["r"]                        = exp["r"]
+        cfg["lora"]["lora_alpha"]               = exp["alpha"]
+        cfg["lora"]["lora_dropout"]             = exp["dropout"]
 
-        # Ensure label generation is skipped if bitext_labeled.csv already exists
-        has_labeled = (DRIVE_ROOT / f"data/processed_{split}/bitext_labeled.csv").exists()
+        # Data already clustered/labeled for raw n=500 — skip those pipeline stages
+        has_labeled = (DRIVE_ROOT / "data/processed_raw/bitext_labeled.csv").exists()
+        cfg["pipeline"]["run_clustering"]       = False
+        cfg["pipeline"]["run_preprocessing"]    = False
         cfg["pipeline"]["run_label_generation"] = not has_labeled
 
-        # Save specific trial config
+        # Leave judge_llm.n_samples untouched (50) — isolation test, no eval-noise change
+        # cfg["evaluation"]["judge_llm"]["n_samples"] stays whatever's in the base config
+
         trial_cfg_path = CODE_DIR / f"configs/{name}.yaml"
         with open(trial_cfg_path, "w") as f:
             yaml.dump(cfg, f, default_flow_style=False)
 
-        # Launch subprocess
         env = os.environ.copy()
         env["PYTHONPATH"] = f"{CODE_DIR}:{env.get('PYTHONPATH', '')}"
         start_ts = time.time()
 
         res = subprocess.run(
-            [sys.executable, str(CODE_DIR / "main.py"), "--phase", "1", "--config", str(trial_cfg_path), "--device_mode", "colab", "--no_checkpoints"],
+            [sys.executable, str(CODE_DIR / "main.py"),
+             "--phase", "1", "--config", str(trial_cfg_path),
+             "--device_mode", "colab"],
+            # NOTE: --no_checkpoints intentionally omitted — pipeline stages are
+            # already skipped above via cfg["pipeline"], and omitting it lets
+            # trainer.py's resume-from-checkpoint logic (if you added the patch)
+            # pick up a partially-finished run after a Colab disconnect.
             cwd=str(CODE_DIR),
             env=env,
             capture_output=True,
-            text=True
+            text=True,
         )
         duration = (time.time() - start_ts) / 60.0
         clear_vram()
 
         if res.returncode != 0:
             print(f"[ERROR] Trial '{name}' failed:\n{res.stderr[-2000:]}")
+            print(f"        Rerun the script — completed experiments will be "
+                  f"skipped, and this one will pick up from its last checkpoint.")
             continue
 
         run_dir = find_latest_dir(run_out, start_ts)
@@ -138,21 +209,62 @@ def main():
             continue
 
         eval_dir = run_dir / "evaluation"
-        dest_split = EXP_DIR / split
-        dest_split.mkdir(parents=True, exist_ok=True)
-
         for fname in ["metrics_summary.csv", "judge_summary.csv", "business_eval.csv"]:
             src = eval_dir / fname
             if src.exists():
                 shutil.copy2(src, dest_split / f"{name}_{fname}")
-                shutil.copy2(src, dest_split / fname)  # Also keep canonical active file
 
         shutil.copy2(trial_cfg_path, dest_split / f"{name}.yaml")
         print(f"✔ Completed {name} in {duration:.2f} min. Exported to {dest_split}")
 
+    _build_comparison_table(dest_split)
     print("\n" + "=" * 75)
-    print("ALL RUNS COMPLETE ON THE TEAM PROMPT!")
+    print("SWEEP COMPLETE — see comparison_raw.csv for the ranked results")
     print("=" * 75)
+
+
+def _build_comparison_table(dest_split: Path) -> None:
+    """Collect every experiment's finetuned composite score into one CSV,
+    tagged with which single parameter changed vs. baseline_v2."""
+    rows = []
+    baseline_params = {"lr": BASELINE["lr"], "epochs": BASELINE["epochs"],
+                        "r": BASELINE["r"], "alpha": BASELINE["alpha"],
+                        "dropout": BASELINE["dropout"],
+                        "warmup_ratio": BASELINE["warmup_ratio"]}
+
+    for exp in EXPERIMENTS:
+        name = exp["name"]
+        judge_path = dest_split / f"{name}_judge_summary.csv"
+        if not judge_path.exists():
+            continue
+        df = pd.read_csv(judge_path)
+        ft_row = df[df["model"] == "finetuned"]
+        if ft_row.empty:
+            continue
+
+        # Identify which single field differs from baseline (blank for baseline itself)
+        changed = [k for k in baseline_params
+                   if exp.get(k if k != "alpha" else "alpha") != baseline_params[k]]
+        varied = ", ".join(changed) if changed else "baseline_v2"
+
+        row = ft_row.iloc[0].to_dict()
+        row["experiment"] = name
+        row["varied_param"] = varied
+        row["lr"] = exp["lr"]; row["epochs"] = exp["epochs"]
+        row["r"] = exp["r"]; row["alpha"] = exp["alpha"]
+        row["dropout"] = exp["dropout"]; row["warmup_ratio"] = exp["warmup_ratio"]
+        rows.append(row)
+
+    if not rows:
+        print("[WARNING] No completed experiments found for comparison table.")
+        return
+
+    comp_df = pd.DataFrame(rows).sort_values("composite", ascending=False)
+    out_path = dest_split / "comparison_raw.csv"
+    comp_df.to_csv(out_path, index=False)
+    print(f"\nRanked comparison → {out_path}")
+    print(comp_df[["experiment", "varied_param", "composite"]].to_string(index=False))
+
 
 if __name__ == "__main__":
     main()
