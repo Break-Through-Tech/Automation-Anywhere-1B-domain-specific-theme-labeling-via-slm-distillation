@@ -76,8 +76,8 @@ clustering:
 # ── Top-k selection ───────────────────────────────────────────────────────────
 top_k: 10 # tickets per cluster for LLM input
 data_augmentation:
-  num_variants: 5
-  sample_size: 7
+  num_variants: 3
+  sample_size: 6
 # ── Frontier LLM (teacher) ────────────────────────────────────────────────────
 teacher_llm:
   provider:      "anthropic"                       # "openai" | "anthropic"
@@ -129,7 +129,7 @@ student_slm:
 lora:
   r:               16        # rank — controls adapter expressiveness
   lora_alpha:      16        # scaling factor (set equal to r as starting point)
-  lora_dropout:    0.05
+  lora_dropout:    0.1
   bias:            "none"
   target_modules:  "all-linear"
   task_type:       "CAUSAL_LM"
