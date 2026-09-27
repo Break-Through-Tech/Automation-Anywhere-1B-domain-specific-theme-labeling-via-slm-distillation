@@ -28,7 +28,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-
+from transformers import AutoTokenizer
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,9 @@ def run_phase1(cfg: dict) -> None:
         val_path   = processed_dir / FILE_VAL_JSONL
 
         # We need a tokenizer for dataset construction; load a temp one
-        _, tokenizer_tmp = load_model_and_tokenizer(cfg)
+        tokenizer_tmp = AutoTokenizer.from_pretrained(
+            cfg["student_slm"]["model_id"].strip(),
+        )  
         if pipe_cfg["run_finetuning"] or not train_path.exists():
             logger.info("\n" + "━" * 60 + "\n  STEP 4: Building dataset\n" + "━" * 60)
             split_paths = build_dataset(cfg, labeled_df, tokenizer_tmp)
