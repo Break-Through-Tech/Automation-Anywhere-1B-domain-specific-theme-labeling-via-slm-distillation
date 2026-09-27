@@ -93,7 +93,7 @@ def run_finetuning(
         model, tokenizer = load_model_and_tokenizer(cfg)
 
     # Apply LoRA — skip if Unsloth already applied it during model load
-    if not _is_unsloth_model(model):
+    if not getattr(model, "peft_config", None):
         peft_config = LoraConfig(
             r=lora_cfg["r"],
             lora_alpha=lora_cfg["lora_alpha"],
