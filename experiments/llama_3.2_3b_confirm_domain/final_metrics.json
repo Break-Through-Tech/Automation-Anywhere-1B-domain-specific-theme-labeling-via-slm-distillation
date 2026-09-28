@@ -1,0 +1,68 @@
+{
+  "run_id": "20260928_2119_Llama-3.2-3B-Instruct_ep3",
+  "judge": {
+    "teacher": {
+      "model": "teacher",
+      "faithfulness": 5.0,
+      "specificity": 5.0,
+      "equivalence": 5.0,
+      "composite": 5.0
+    },
+    "baseline": {
+      "model": "baseline",
+      "faithfulness": 4.15,
+      "specificity": 3.6,
+      "equivalence": 3.45,
+      "composite": 3.733333333333333
+    },
+    "finetuned": {
+      "model": "finetuned",
+      "faithfulness": 4.45,
+      "specificity": 3.85,
+      "equivalence": 3.8,
+      "composite": 4.033333333333333
+    }
+  },
+  "nonllm": {
+    "teacher": {
+      "model": "teacher",
+      "cosine_sim_same": 1.0000000715255737,
+      "cosine_sim_multi": 1.0000000715255737,
+      "rouge_l_same": 1.0,
+      "rouge_l_multi": 1.0,
+      "bertscore_f1_same": 1.0000000238418578,
+      "bertscore_f1_multi": 1.0000000238418578
+    },
+    "baseline": {
+      "model": "baseline",
+      "cosine_sim_same": 0.81397585272789,
+      "cosine_sim_multi": 0.8503426849842072,
+      "rouge_l_same": 0.4528314367091456,
+      "rouge_l_multi": 0.5290727525828145,
+      "bertscore_f1_same": 0.918991306424141,
+      "bertscore_f1_multi": 0.9255739957094192
+    },
+    "finetuned": {
+      "model": "finetuned",
+      "cosine_sim_same": 0.830218568444252,
+      "cosine_sim_multi": 0.8867378771305084,
+      "rouge_l_same": 0.5413917944800297,
+      "rouge_l_multi": 0.6973394252806016,
+      "bertscore_f1_same": 0.9331317216157912,
+      "bertscore_f1_multi": 0.9520064026117324
+    }
+  },
+  "business": {
+    "label_gen_latency_mean_s": 0.9184420676458448,
+    "label_gen_latency_p95_s": 1.1932354450225828,
+    "label_gen_total_calls": 105.0,
+    "slm_inference_latency_mean_s_baseline": 0.6300391316413879,
+    "slm_throughput_labels_per_min_baseline": 95.23218001346528,
+    "slm_inference_latency_mean_s_finetuned": 0.5447555422782898,
+    "slm_throughput_labels_per_min_finetuned": 110.141146520633,
+    "finetuning_wall_time_s": 168.8247365951538,
+    "finetuning_wall_time_min": 2.81374560991923,
+    "teacher_llm_estimated_cost_usd": 0.01365,
+    "slm_inference_estimated_cost_usd": 0.0
+  }
+}

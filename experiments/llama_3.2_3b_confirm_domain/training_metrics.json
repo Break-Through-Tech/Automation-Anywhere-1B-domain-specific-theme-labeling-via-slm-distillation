@@ -1,0 +1,17 @@
+{
+  "epoch_eval_loss": [
+    {
+      "epoch": 1.0,
+      "eval_loss": 1.6552009582519531
+    },
+    {
+      "epoch": 2.0,
+      "eval_loss": 1.409417986869812
+    },
+    {
+      "epoch": 3.0,
+      "eval_loss": 1.3865294456481934
+    }
+  ],
+  "finetuning_wall_time_min": 2.81374560991923
+}

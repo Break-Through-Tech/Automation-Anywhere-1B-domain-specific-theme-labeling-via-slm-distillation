@@ -1,0 +1,14 @@
+{
+  "run_id": "20260928_2119_Llama-3.2-3B-Instruct_ep3",
+  "model_id": "meta-llama/Llama-3.2-3B-Instruct",
+  "n_samples": 500,
+  "epochs": 3,
+  "learning_rate": 0.0002,
+  "lora_r": 16,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "completion_only_loss": true,
+  "include_domain_in_prompt": true,
+  "load_in_4bit": false,
+  "generated_at": "2026-09-28T22:31:05.979856"
+}
