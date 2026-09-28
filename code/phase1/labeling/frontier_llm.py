@@ -77,27 +77,61 @@ def run_label_generation(
     model_id   = llm_cfg["model"]
     provider   = llm_cfg["provider"]
     domain     = cfg["dataset"]["domain"]
-    out_dir    = Path(cfg["paths"]["data_processed"])
+    out_dir = Path(cfg["paths"]["data_processed"])
     out_dir.mkdir(parents=True, exist_ok=True)
     labeled_csv = out_dir / FILE_LABELED_CSV
 
-    # Partial checkpoint: if labeled CSV exists, reload it and skip done clusters
     label_cols = [cluster_name_col(model_id, pid) for pid in PROMPT_IDS]
+    
+    # FIX: Check if the file exists AND contains the correct columns for the current model/config.
+    # If the teacher model ID or prompt columns changed, discard the stale file to force regeneration.
+    force_fresh = False
     if labeled_csv.exists():
+        temp_df = pd.read_csv(labeled_csv, nrows=1)
+        # Verify that all required label columns for the *current* model exist in the file
+        missing_cols = [col for col in label_cols if col not in temp_df.columns]
+        if missing_cols:
+            logger.warning(
+                f"[labeling] Existing {labeled_csv.name} lacks columns for current config/model "
+                f"({missing_cols}). Forcing fresh teacher label generation."
+            )
+            force_fresh = True
+
+    # Partial checkpoint logic with safety check
+    if labeled_csv.exists() and not force_fresh:
         labeled_df = pd.read_csv(labeled_csv)
-        done_clusters = set(
-            labeled_df[CLUSTER_ID][labeled_df[label_cols[0]].notna()].unique()
-        )
-        logger.info(
-            f"[labeling] Resuming — {len(done_clusters)} clusters already labeled."
-        )
+        
+        # Additional safety: check if columns exist before filtering
+        valid_label_cols = [c for c in label_cols if c in labeled_df.columns]
+        if not valid_label_cols:
+            labeled_df = clustered_df.copy()
+            for col in label_cols:
+                labeled_df[col] = None
+            done_clusters = set()
+            logger.info("[labeling] Stale columns found. Starting label generation fresh.")
+        else:
+            done_clusters = set(
+                labeled_df[CLUSTER_ID][labeled_df[valid_label_cols[0]].notna()].unique()
+            )
+            total_clusters = len(grouped_df[CLUSTER_ID].unique())
+            
+            if len(done_clusters) >= total_clusters:
+                logger.warning(
+                    f"[labeling] {labeled_csv} already has ALL {total_clusters} "
+                    f"clusters labeled. To force a clean re-generation under new prompt configs, "
+                    f"delete {labeled_csv.name} first."
+                )
+            else:
+                logger.info(
+                    f"[labeling] Resuming — {len(done_clusters)}/{total_clusters} "
+                    f"clusters already labeled."
+                )
     else:
         # Start fresh: copy clustered_df and add empty label columns
         labeled_df = clustered_df.copy()
         for col in label_cols:
             labeled_df[col] = None
         done_clusters = set()
-
     clusters = grouped_df[CLUSTER_ID].unique()
     todo     = [c for c in clusters if c not in done_clusters]
     logger.info(f"[labeling] Generating labels for {len(todo)} clusters ...")
