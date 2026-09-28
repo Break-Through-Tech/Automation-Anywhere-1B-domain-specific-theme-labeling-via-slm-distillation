@@ -1,0 +1,3 @@
+model,faithfulness,specificity,equivalence,composite,experiment,baseline_composite
+finetuned,4.45,3.85,3.8,4.033333333333333,confirm_baseline_v2,3.733333333333333
+finetuned,4.3,3.85,3.7,3.95,confirm_dropout0.0,3.7166666666666655
