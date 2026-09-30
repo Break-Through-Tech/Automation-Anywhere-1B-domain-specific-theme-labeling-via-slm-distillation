@@ -93,7 +93,7 @@ def run_finetuning(
         model, tokenizer = load_model_and_tokenizer(cfg)
 
     # Apply LoRA — skip if Unsloth already applied it during model load
-    if not getattr(model, "peft_config", None):
+    if not _is_unsloth_model(model):
         peft_config = LoraConfig(
             r=lora_cfg["r"],
             lora_alpha=lora_cfg["lora_alpha"],
@@ -237,24 +237,11 @@ def _load_colab(model_id: str, cfg: dict):
     try:
         from unsloth import FastLanguageModel
         logger.info("[trainer] Unsloth detected — using accelerated loading.")
-
-        load_dtype = (
-            torch.bfloat16
-            if cfg["training"].get("bf16", False)
-            and torch.cuda.is_bf16_supported()
-            else torch.float16
-        )
-
-      
-      
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_id,
             max_seq_length=cfg["student_slm"]["max_seq_length"],
-            dtype=load_dtype,
             load_in_4bit=qlora_cfg["load_in_4bit"],
         )
-
-      
         model = FastLanguageModel.get_peft_model(
             model,
             r=lora_cfg["r"],

@@ -28,7 +28,7 @@ import shutil
 import time
 from datetime import datetime
 from pathlib import Path
-from transformers import AutoTokenizer
+
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -175,9 +175,7 @@ def run_phase1(cfg: dict) -> None:
         val_path   = processed_dir / FILE_VAL_JSONL
 
         # We need a tokenizer for dataset construction; load a temp one
-        tokenizer_tmp = AutoTokenizer.from_pretrained(
-            cfg["student_slm"]["model_id"].strip(),
-        )  
+        _, tokenizer_tmp = load_model_and_tokenizer(cfg)
         if pipe_cfg["run_finetuning"] or not train_path.exists():
             logger.info("\n" + "━" * 60 + "\n  STEP 4: Building dataset\n" + "━" * 60)
             split_paths = build_dataset(cfg, labeled_df, tokenizer_tmp)
@@ -282,33 +280,9 @@ def run_phase1(cfg: dict) -> None:
                 )
                 from peft import PeftModel
                 t_load = time.time()
-              
                 ft_base, ft_tok = load_model_and_tokenizer(cfg)
-                if isinstance(ft_base, PeftModel):
-                    # The Unsloth loader already attached a fresh adapter.
-                    # Load the saved adapter into the existing wrapper.
-                    ft_base.load_adapter(
-                        str(adapter_dir),
-                        adapter_name="trained",
-                        is_trainable=False,
-                    )
-                    ft_base.set_adapter("trained")
-                    ft_model = ft_base
-                else:
-                    # Standard Hugging Face loader returned a plain base model.
-                    ft_model = PeftModel.from_pretrained(
-                        ft_base,
-                        str(adapter_dir),
-                        adapter_name="trained",
-                        is_trainable=False,
-                    )
-
+                ft_model        = PeftModel.from_pretrained(ft_base, str(adapter_dir))
                 ft_model.eval()
-                logger.info(
-                    "[pipeline] Active adapters: %s",
-                    ft_model.active_adapters,
-                )
-              
                 business_eval.record_model_load_time("finetuned", time.time() - t_load)
                 _run_inference(
                     model=ft_model, tokenizer=ft_tok, cfg=cfg,
@@ -316,7 +290,7 @@ def run_phase1(cfg: dict) -> None:
                     fine_tuned=True, output_path=str(finetuned_preds_path),
                     business_eval=business_eval,
                 )
-                del ft_model, ft_base, ft_tok
+                del ft_model
                 _clear_device_cache()
             else:
                 logger.warning(
