@@ -282,9 +282,33 @@ def run_phase1(cfg: dict) -> None:
                 )
                 from peft import PeftModel
                 t_load = time.time()
+              
                 ft_base, ft_tok = load_model_and_tokenizer(cfg)
-                ft_model        = PeftModel.from_pretrained(ft_base, str(adapter_dir))
+                if isinstance(ft_base, PeftModel):
+                    # The Unsloth loader already attached a fresh adapter.
+                    # Load the saved adapter into the existing wrapper.
+                    ft_base.load_adapter(
+                        str(adapter_dir),
+                        adapter_name="trained",
+                        is_trainable=False,
+                    )
+                    ft_base.set_adapter("trained")
+                    ft_model = ft_base
+                else:
+                    # Standard Hugging Face loader returned a plain base model.
+                    ft_model = PeftModel.from_pretrained(
+                        ft_base,
+                        str(adapter_dir),
+                        adapter_name="trained",
+                        is_trainable=False,
+                    )
+
                 ft_model.eval()
+                logger.info(
+                    "[pipeline] Active adapters: %s",
+                    ft_model.active_adapters,
+                )
+              
                 business_eval.record_model_load_time("finetuned", time.time() - t_load)
                 _run_inference(
                     model=ft_model, tokenizer=ft_tok, cfg=cfg,
@@ -292,7 +316,7 @@ def run_phase1(cfg: dict) -> None:
                     fine_tuned=True, output_path=str(finetuned_preds_path),
                     business_eval=business_eval,
                 )
-                del ft_model
+                del ft_model, ft_base, ft_tok
                 _clear_device_cache()
             else:
                 logger.warning(
