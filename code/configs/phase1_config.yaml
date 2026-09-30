@@ -17,10 +17,10 @@ seed: 42
 # ── Pipeline steps to run ────────────────────────────────────────────────────
 # Set any step to false to skip it (useful for re-running specific steps).
 pipeline:
-  run_clustering:       true   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
-  run_preprocessing:    true   # Group by cluster, select top-k, save grouped CSV
-  run_label_generation: true   # Call frontier LLM, generate 5 labels per cluster
-  run_finetuning:       true   # QLoRA / LoRA fine-tune the student SLM
+  run_clustering:       false   # Download Bitext, embed, UMAP, HDBSCAN, save CSV
+  run_preprocessing:    false   # Group by cluster, select top-k, save grouped CSV
+  run_label_generation: false   # Call frontier LLM, generate 5 labels per cluster
+  run_finetuning:       false   # QLoRA / LoRA fine-tune the student SLM
   run_baseline_eval:    true   # Evaluate vanilla (pre-distillation) SLM
   run_finetuned_eval:   true   # Evaluate fine-tuned SLM
   run_llm_judge:        true   # LLM-as-judge evaluation (Claude Haiku)
@@ -170,7 +170,7 @@ evaluation:
   # Set to the run directory path to skip all training and run only evaluations.
   # Example: "outputs/20260819_2347_SmolLM2-1.7B-Instruct_ep6"
   # Leave null for a normal training + evaluation run.
-  existing_run_dir: null
+  existing_run_dir: "/content/drive/MyDrive/slm-distillation/outputs/20260927_2040_gemma-3-4b-it_ep2"
 
   # ── Which clusters to run SLM inference on ────────────────────────────────
   # false (default) — inference only on TEST clusters. Faster; produces 3–5
@@ -216,7 +216,7 @@ evaluation:
 inference:
   # Path to the LoRA adapter from a completed training run.
   # Example: "outputs/20260819_2347_SmolLM2-1.7B-Instruct_ep6/models/lora_adapter"
-  adapter_dir: "outputs/20260821_2216_Meta-Llama-3.1-8B-Instruct_ep5/models/lora_adapter"
+  adapter_dir: "/content/drive/MyDrive/slm-distillation/outputs/20260927_2040_gemma-3-4b-it_ep2/models/lora_adapter"
 
   # Path to a plain text file with one support ticket per line.
   # Example: "demo_tickets.txt"
