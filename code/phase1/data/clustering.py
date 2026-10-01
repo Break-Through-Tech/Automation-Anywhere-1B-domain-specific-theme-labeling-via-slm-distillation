@@ -137,11 +137,26 @@ def _load_bitext(ds_cfg: dict) -> pd.DataFrame:
     Filters to the categories in ds_cfg['it_categories'] and samples
     ds_cfg['n_samples'] rows.
     """
-    from datasets import load_dataset
+    csv_path = ds_cfg.get("csv_path")
+    if csv_path:
+        path = Path(csv_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Dataset CSV not found: {path}")
+        logger.info(f"[clustering] Loading local CSV: {path}")
+        df = pd.read_csv(path, encoding="utf-8-sig")
 
-    logger.info(f"[clustering] Downloading dataset: {ds_cfg['name']}")
-    raw = load_dataset(ds_cfg["name"], split="train")
-    df  = raw.to_pandas()
+    else:
+        from datasets import load_dataset
+
+        logger.info(f"[clustering] Downloading dataset: {ds_cfg['name']}")
+        raw = load_dataset(ds_cfg["name"], split="train")
+        df = raw.to_pandas()
+
+    required = {ds_cfg.get("text_column", "instruction"), "category"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Dataset is missing columns: {sorted(missing)}")
+  
 
     logger.info(f"[clustering] Raw dataset: {len(df)} rows")
     logger.info(f"[clustering] Available categories: {sorted(df['category'].unique().tolist())}")
