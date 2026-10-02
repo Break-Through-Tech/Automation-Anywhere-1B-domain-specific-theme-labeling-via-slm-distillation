@@ -15,6 +15,17 @@ Rate limiting:
 
 Business eval:
   - Tracks per-call latency via BusinessEvaluator context manager
+
+NOTE ON TEMPERATURE (anthropic SDK v1.11.0+)
+---------------------------------------------
+This SDK version's Messages.create() does not accept a 'temperature'
+parameter at all (confirmed via inspect.signature — not in the accepted
+kwargs for this endpoint). teacher_llm.temperature in config therefore has
+NO effect: every teacher label-generation call runs at the API's
+uncontrollable default sampling behavior, not temperature=0.3 as
+configured. The self-healing kwarg-stripping loop below correctly removes
+'temperature' and retries — this is not a bug to fix, it's a genuine SDK
+capability gap. See the one-time warning logged at first call.
 """
 
 import json
@@ -35,6 +46,10 @@ from tenacity import (
 logger = logging.getLogger(__name__)
 
 CHECKPOINT_EVERY = 10  # save progress every N clusters
+
+# One-time warning flag — avoids logging the temperature-unsupported notice
+# on every single teacher call (previously logged 100+ times per run).
+_TEMPERATURE_WARNING_SHOWN = False
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -82,7 +97,7 @@ def run_label_generation(
     labeled_csv = out_dir / FILE_LABELED_CSV
 
     label_cols = [cluster_name_col(model_id, pid) for pid in PROMPT_IDS]
-    
+
     # FIX: Check if the file exists AND contains the correct columns for the current model/config.
     # If the teacher model ID or prompt columns changed, discard the stale file to force regeneration.
     force_fresh = False
@@ -100,7 +115,7 @@ def run_label_generation(
     # Partial checkpoint logic with safety check
     if labeled_csv.exists() and not force_fresh:
         labeled_df = pd.read_csv(labeled_csv)
-        
+
         # Additional safety: check if columns exist before filtering
         valid_label_cols = [c for c in label_cols if c in labeled_df.columns]
         if not valid_label_cols:
@@ -114,7 +129,7 @@ def run_label_generation(
                 labeled_df[CLUSTER_ID][labeled_df[valid_label_cols[0]].notna()].unique()
             )
             total_clusters = len(grouped_df[CLUSTER_ID].unique())
-            
+
             if len(done_clusters) >= total_clusters:
                 logger.warning(
                     f"[labeling] {labeled_csv} already has ALL {total_clusters} "
@@ -195,6 +210,16 @@ def _call_anthropic(messages: list[dict], llm_cfg: dict) -> str:
     import re
     import anthropic
 
+    global _TEMPERATURE_WARNING_SHOWN
+    if not _TEMPERATURE_WARNING_SHOWN:
+        logger.warning(
+            f"[labeling] anthropic SDK v{anthropic.__version__} does not "
+            "support a 'temperature' parameter on messages.create() — "
+            "teacher_llm.temperature has NO effect; sampling is NOT "
+            "deterministic. This warning logs once per process."
+        )
+        _TEMPERATURE_WARNING_SHOWN = True
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise EnvironmentError("ANTHROPIC_API_KEY not set in environment.")
@@ -218,6 +243,15 @@ def _call_anthropic(messages: list[dict], llm_cfg: dict) -> str:
         kwargs = dict(
             model=llm_cfg["model"],
             max_tokens=llm_cfg["max_tokens"],
+            # NOTE: temperature is intentionally included here even though
+            # this SDK version (anthropic 1.11.0) does not accept it —
+            # inspect.signature(client.messages.create) confirms 'temperature'
+            # is not in the accepted kwargs for this endpoint. The
+            # self-healing loop below strips it on the first TypeError and
+            # retries successfully. This is left in place (rather than
+            # removed) so the code auto-recovers correctly if/when the SDK
+            # is upgraded to a version that DOES support it, without
+            # requiring another code change.
             temperature=llm_cfg["temperature"],
             system=system_msg,
             messages=user_msgs,
