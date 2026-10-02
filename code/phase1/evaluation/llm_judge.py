@@ -18,6 +18,18 @@ LLM-as-judge evaluation with two modes:
       Set in configs/phase1_config.yaml → evaluation.judge_mode: "reference_free"
 
 Both modes apply to all three tags (teacher / baseline / finetuned).
+
+NOTE ON TEMPERATURE (anthropic SDK v1.11.0+)
+---------------------------------------------
+This SDK version's Messages.create() does not accept a 'temperature'
+parameter at all (confirmed via inspect.signature — not in the accepted
+kwargs for this endpoint). judge_llm.temperature in config therefore has
+NO effect: every judge call runs at the API's uncontrollable default
+sampling behavior, not temperature=0.0 as configured. The self-healing
+kwarg-stripping loop below correctly removes 'temperature' and retries —
+this is not a bug to fix, it's a genuine SDK capability gap. See the
+one-time warning logged at first call. Judge scores therefore carry
+run-to-run sampling variance beyond what n_samples alone captures.
 """
 
 import json
@@ -83,6 +95,10 @@ Respond ONLY with valid JSON (no markdown fences, no extra text):
 # Dimension names per mode (used for saving and summarising)
 DIMS_WITH_REF  = ("faithfulness", "specificity", "equivalence")
 DIMS_REF_FREE  = ("faithfulness", "specificity", "coherence")
+
+# One-time warning flag — avoids logging the temperature-unsupported notice
+# on every single judge call (previously logged 100+ times per run).
+_TEMPERATURE_WARNING_SHOWN = False
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -321,6 +337,16 @@ def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
     import anthropic
     from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+    global _TEMPERATURE_WARNING_SHOWN
+    if not _TEMPERATURE_WARNING_SHOWN:
+        logger.warning(
+            f"[llm_judge] anthropic SDK v{anthropic.__version__} does not "
+            "support a 'temperature' parameter on messages.create() — "
+            "judge_llm.temperature has NO effect; sampling is NOT "
+            "deterministic. This warning logs once per process."
+        )
+        _TEMPERATURE_WARNING_SHOWN = True
+
     client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
 
     @retry(
@@ -333,6 +359,15 @@ def _anthropic_call(messages: list[dict], judge_cfg: dict) -> str:
         kwargs = dict(
             model=judge_cfg["model"],
             max_tokens=200,
+            # NOTE: temperature is intentionally included here even though
+            # this SDK version (anthropic 1.11.0) does not accept it —
+            # inspect.signature(client.messages.create) confirms 'temperature'
+            # is not in the accepted kwargs for this endpoint. The
+            # self-healing loop below strips it on the first TypeError and
+            # retries successfully. This is left in place (rather than
+            # removed) so the code auto-recovers correctly if/when the SDK
+            # is upgraded to a version that DOES support it, without
+            # requiring another code change.
             temperature=float(judge_cfg["temperature"]),
             messages=messages,
         )
