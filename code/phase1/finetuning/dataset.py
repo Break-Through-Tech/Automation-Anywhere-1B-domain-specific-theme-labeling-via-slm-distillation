@@ -4,7 +4,19 @@ phase1/finetuning/dataset.py
 Converts the labeled cluster CSV into JSONL files for LoRA/QLoRA fine-tuning.
 
 Split strategy: cluster-level (never ticket-level) to prevent data leakage.
-One training example = (cluster, prompt_id) pair → 5 examples per cluster.
+One training example = (cluster, prompt_id) pair → 5 examples per cluster,
+multiplied by data_augmentation.num_variants if augmentation is enabled.
+
+Augmentation
+------------
+If cfg["data_augmentation"] is present, TRAIN examples are built from
+num_variants resampled subsets of each cluster's top-k tickets (sample_size
+tickets per variant, sampled without replacement from the full top-k pool).
+VAL and TEST always use the original, unaugmented top-k tickets — this is
+intentional: augmentation inflates train signal without ever letting the
+model train directly on what val/test will later score it against.
+If cfg["data_augmentation"] is absent, behavior is identical to the
+original (unaugmented) implementation — this is fully backward-compatible.
 """
 
 import json
@@ -41,9 +53,9 @@ def build_dataset(cfg: dict, labeled_df: pd.DataFrame, tokenizer) -> dict:
         CLUSTER_ID, TICKET_RANK, TICKET_DETAILS, TICKET_ID,
         PROMPT_IDS, cluster_name_col,
         FILE_TRAIN_JSONL, FILE_VAL_JSONL, FILE_TEST_JSONL,
+        FILE_CLUSTER_SPLITS,
         top_k_details_col,
     )
-    from phase1.prompts.templates import build_messages
 
     k          = cfg["top_k"]
     model_id   = cfg["teacher_llm"]["model"]
@@ -73,7 +85,6 @@ def build_dataset(cfg: dict, labeled_df: pd.DataFrame, tokenizer) -> dict:
     )
 
     # ── Build top-k ticket lookup per cluster ─────────────────────────────────
-    # Each cluster → ordered list of top-k ticket texts
     top_k_df = labeled_df[labeled_df[TICKET_RANK] <= k].copy()
     cluster_tickets: dict[int, list[str]] = {}
     for cid, grp in top_k_df.groupby(CLUSTER_ID):
@@ -102,7 +113,7 @@ def build_dataset(cfg: dict, labeled_df: pd.DataFrame, tokenizer) -> dict:
     for split_name, (cluster_set, filename) in splits.items():
         examples = _build_examples(
             cluster_set, cluster_tickets, cluster_labels,
-            cfg, tokenizer, max_seq, domain,
+            cfg, tokenizer, max_seq, domain, split_name,
         )
         path = out_dir / filename
         _write_jsonl(examples, path)
@@ -110,6 +121,16 @@ def build_dataset(cfg: dict, labeled_df: pd.DataFrame, tokenizer) -> dict:
         logger.info(
             f"[dataset] {split_name}: {len(examples)} examples → {path}"
         )
+
+    # Save cluster → split mapping so evaluation can label pivot rows correctly
+    split_map = {}
+    for split_name, (cluster_set, _) in splits.items():
+        for cid in cluster_set:
+            split_map[int(cid)] = split_name
+    splits_path = out_dir / FILE_CLUSTER_SPLITS
+    with open(splits_path, "w") as f:
+        json.dump(split_map, f)
+    logger.info(f"[dataset] Cluster split map saved → {splits_path}")
 
     return paths
 
@@ -146,14 +167,29 @@ def _build_examples(
     tokenizer,
     max_seq: int,
     domain: str,
+    split_name: str,
 ) -> list[dict]:
-    """Build instruction-following examples for a set of clusters."""
-    from phase1.data.schema import PROMPT_IDS, cluster_name_col
+    """
+    Build instruction-following examples for a set of clusters.
+
+    TRAIN: if cfg["data_augmentation"] is present, each cluster generates
+    num_variants examples per prompt, each built from a different resampled
+    subset (sample_size tickets, sampled without replacement from that
+    cluster's full top-k pool) instead of one fixed example per prompt.
+
+    VAL / TEST: always one example per prompt, using the original top-k
+    tickets unchanged — regardless of whether augmentation is configured.
+    """
+    from phase1.data.schema import PROMPT_IDS
     from phase1.prompts.templates import build_messages
 
-    model_id = cfg["teacher_llm"]["model"]
     examples = []
     skipped  = 0
+
+    aug_cfg = cfg.get("data_augmentation")
+    # Separate RNG, seeded off the main seed, so augmentation sampling is
+    # reproducible but doesn't perturb the cluster-split shuffle above.
+    rng = random.Random(cfg["seed"] + 1000)
 
     for cid in sorted(cluster_set):
         if cid not in cluster_tickets or cid not in cluster_labels:
@@ -161,35 +197,49 @@ def _build_examples(
         ticket_texts = cluster_tickets[cid]
         labels       = cluster_labels[cid]
 
+        if split_name == "train" and aug_cfg:
+            num_variants = aug_cfg["num_variants"]
+            sample_size  = min(aug_cfg["sample_size"], len(ticket_texts))
+            ticket_variants = []
+            for _ in range(num_variants):
+                idx = sorted(rng.sample(range(len(ticket_texts)), sample_size))
+                ticket_variants.append([ticket_texts[i] for i in idx])
+        else:
+            # Unaugmented: val/test always, train when no data_augmentation config
+            ticket_variants = [ticket_texts]
+
         for prompt_id in PROMPT_IDS:
             if prompt_id not in labels:
                 continue
 
-            label    = labels[prompt_id]
-            messages = build_messages(prompt_id, ticket_texts, cfg, domain)
+            label = labels[prompt_id]
 
-            # Prompt: system + user, with generation prompt appended (no label yet)
-            prompt_text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            # Completion: just the label text (+ eos so the model learns to stop)
-            completion_text = label + tokenizer.eos_token
+            for variant_id, variant_tickets in enumerate(ticket_variants):
+                messages = build_messages(prompt_id, variant_tickets, cfg, domain)
 
-            # Length check (skip if too long)
-            token_len = len(tokenizer.encode(prompt_text + completion_text))
-            if token_len > max_seq:
-                skipped += 1
-                continue
+                # Prompt: system + user, with generation prompt appended (no label yet)
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                # Completion: just the label text (+ eos so the model learns to stop)
+                completion_text = label + tokenizer.eos_token
 
-            examples.append({
-                "prompt":     prompt_text,
-                "completion": completion_text,
-                "cluster_id": int(cid),
-                "prompt_id":  prompt_id,
-            })
-            
+                # Length check (skip if too long)
+                token_len = len(tokenizer.encode(prompt_text + completion_text))
+                if token_len > max_seq:
+                    skipped += 1
+                    continue
+
+                examples.append({
+                    "prompt":     prompt_text,
+                    "completion": completion_text,
+                    "cluster_id": int(cid),
+                    "prompt_id":  prompt_id,
+                    "variant_id": variant_id,
+                })
+
     if skipped > 0:
         logger.warning(
             f"[dataset] Skipped {skipped} examples exceeding max_seq_length={max_seq}."
