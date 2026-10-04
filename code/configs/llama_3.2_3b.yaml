@@ -33,6 +33,11 @@ checkpoints:
   umap_file:         "checkpoints/phase1_umap.pkl"
   clustering_file:   "checkpoints/phase1_clustering.csv"
 
+# ── Training data augmentation (train split only; val/test always unaugmented) ─
+data_augmentation:
+  num_variants: 5      # resampled subsets per cluster per prompt (train only)
+  sample_size:  7       # tickets per variant, sampled from top_k (=10) without replacement
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 paths:
   drive_root:          "."
