@@ -86,6 +86,11 @@ def messages_for(cfg, pid, tickets):
             {"role": "user", "content": p[pid].replace("{tickets}", numbered)}]
 
 
+def tokenize_rendered_prompt(tokenizer, text, **kwargs):
+    # apply_chat_template(tokenize=False) already supplies BOS/control tokens.
+    return tokenizer(text, add_special_tokens=False, truncation=False, **kwargs)
+
+
 def prepare_workload(run, cfg, prompt_ids):
     labels = read_csv(Path(run) / "evaluation/labels_by_cluster.csv")
     selected = [r for r in labels if r["split"] == "test" and r["prompt_id"] in prompt_ids]
@@ -262,7 +267,10 @@ def summarize(records, hourly_rate):
             "mean_input_tokens": statistics.mean(r["input_tokens"] for r in ok) if ok else None,
             "mean_output_tokens": statistics.mean(r["output_tokens"] for r in ok) if ok else None,
             "output_tokens_per_generation_second": sum(r["output_tokens"] for r in ok) / sum(gen) if gen else None,
-            "serial_labels_per_minute": 60 / statistics.mean(lat) if lat else None,
+            "latency_only_labels_per_minute": 60 / statistics.mean(lat) if lat else None,
+            "paced_serial_labels_per_minute_estimate": (
+                60 / statistics.mean(r["latency_s"] + r["pacing_s"] for r in ok)
+                if ok and all(r.get("pacing_s") is not None for r in ok) else None),
             "token_limit_reached": sum(bool(r.get("token_limit_reached")) for r in ok),
             "peak_allocated_gib": max((r.get("peak_allocated_gib", 0) for r in ok), default=0) if name != "teacher" else None,
             "estimated_serving_usd_per_1000_labels": per_label * 1000 if per_label is not None else None,
@@ -304,6 +312,7 @@ def save_reports(out, records, loads, manifest, rate):
     write_json(out / "manifest.json", manifest)
     lines = ["# Latency and cost benchmark", "", f"Status: **{manifest['status']}**", "",
              "All latencies are completed-label latency, not time-to-first-token. Warmups and failed/empty requests are excluded from latency summaries; failures are counted separately. Teacher time includes network/API wait; SLM time includes tokenization, transfer, generation and decoding, excluding prompt rendering and disk writes.", "",
+             "Latency-only labels/minute excludes deliberate pacing. The paced serial estimate includes configured per-call pauses but excludes loading, logging and other loop overhead; neither is measured concurrent serving throughput. This compares these deployments, not intrinsic model-size efficiency.", "",
              "| Model | Successful / attempted | Mean s | Median s | p95 s | Estimated USD / 1,000 labels |",
              "|---|---:|---:|---:|---:|---:|"]
     for r in summary:
@@ -445,12 +454,16 @@ def main():
         max_length = int(cfg["student_slm"]["max_seq_length"])
         for r in workload:
             r["prompt_text"] = tokenizer.apply_chat_template(r["messages"], tokenize=False, add_generation_prompt=True)
-            # Match the repo's tokenizer call, including its default special-token behavior.
-            ids = tokenizer(r["prompt_text"], truncation=False)["input_ids"]
+            ids = tokenize_rendered_prompt(tokenizer, r["prompt_text"])["input_ids"]
+            if tokenizer.bos_token_id is not None and ids[:2] == [tokenizer.bos_token_id] * 2:
+                raise ValueError("Duplicate BOS tokens in rendered input; check the saved chat template")
             if len(ids) > max_length:
                 raise ValueError(f"Cluster {r['cluster_id']}/{r['prompt_id']} exceeds {max_length} tokens; refuse silent truncation")
             r["input_tokens"] = len(ids)
+            r["input_token_ids_prefix"] = ids[:8]
             r["input_ids_sha256"] = digest(ids)
+        manifest["tokenization"] = {"add_special_tokens": False, "truncation": False,
+                                    "reason": "Rendered chat template already contains control tokens"}
         manifest["rendered_workload_sha256"] = digest(workload)
         write_json(out / "workload.json", workload)
         # Avoid inheriting sampling or suppress-token settings from unrelated generations.
@@ -511,6 +524,7 @@ def main():
                 usage = response.usage.model_dump()
                 row = {"model": "teacher", "round": rnd, "phase": phase, "cluster_id": r["cluster_id"], "prompt_id": r["prompt_id"],
                        "status": "ok" if label else "empty", "latency_s": elapsed,
+                       "pacing_s": args.teacher_gap_s,
                        "input_tokens": usage["input_tokens"] + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0),
                        "output_tokens": usage["output_tokens"], "label": label, "usage": usage,
                        "estimated_api_cost_usd": api_cost(usage, args.teacher_input_usd_per_million, args.teacher_output_usd_per_million),
@@ -519,6 +533,7 @@ def main():
             except Exception as e:
                 row = {"model": "teacher", "round": rnd, "phase": phase, "cluster_id": r["cluster_id"], "prompt_id": r["prompt_id"],
                        "status": "error", "latency_s": time.perf_counter() - t0,
+                       "pacing_s": args.teacher_gap_s,
                        "error_type": type(e).__name__, "error_message": redact_error(str(e)),
                        "http_status": getattr(e, "status_code", None), "estimated_api_cost_usd": None}
                 # No retry: avoids hidden latency and duplicate billed requests.
@@ -540,7 +555,7 @@ def main():
         def local_request(model, r, check_scores=False):
             torch.cuda.synchronize()
             start = time.perf_counter()
-            inputs = tokenizer(r["prompt_text"], return_tensors="pt", truncation=False)
+            inputs = tokenize_rendered_prompt(tokenizer, r["prompt_text"], return_tensors="pt")
             inputs = {k: v.to("cuda:0") for k, v in inputs.items()}
             torch.cuda.synchronize()
             g0 = time.perf_counter()
@@ -553,6 +568,7 @@ def main():
             label = tokenizer.decode(ids, skip_special_tokens=True).strip()
             elapsed = time.perf_counter() - start
             return {"status": "ok" if label else "empty", "latency_s": elapsed, "generation_s": generation_s,
+                    "pacing_s": 0.0,
                     "input_tokens": r["input_tokens"], "output_tokens": len(ids), "label": label,
                     "output_token_ids": ids,
                     "raw_decoded_text": tokenizer.decode(ids, skip_special_tokens=False),
