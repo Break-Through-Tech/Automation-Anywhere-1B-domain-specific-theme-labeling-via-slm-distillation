@@ -78,8 +78,7 @@ def run_finetuning(
     """
     from datasets import load_dataset
     from peft import get_peft_model, LoraConfig, TaskType
-    from transformers import TrainingArguments
-    from trl import SFTTrainer
+    from trl import SFTTrainer, SFTConfig
 
     device_mode = cfg["device_mode"]
     train_cfg   = cfg["training"]
@@ -107,6 +106,22 @@ def run_finetuning(
         model.print_trainable_parameters()
 
     train_ds = load_dataset("json", data_files=train_path, split="train")
+    logger.info(
+        "[trainer] Dataset columns: "
+        f"{train_ds.column_names}"
+    )
+
+    if "prompt" not in train_ds.column_names:
+        raise ValueError(
+            "Training dataset is missing 'prompt'. "
+            "Rebuild dataset.py output."
+        )
+
+    if "completion" not in train_ds.column_names:
+        raise ValueError(
+            "Training dataset is missing 'completion'. "
+            "Rebuild dataset.py output."
+        )
     val_ds   = load_dataset("json", data_files=val_path,   split="train")
     logger.info(f"[trainer] Train: {len(train_ds)} | Val: {len(val_ds)} examples")
 
@@ -130,25 +145,34 @@ def run_finetuning(
         per_device_train_batch_size=train_cfg["per_device_train_batch_size"],
         per_device_eval_batch_size=train_cfg["per_device_train_batch_size"],
         gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
+      
         learning_rate=train_cfg["learning_rate"],
         lr_scheduler_type=train_cfg["lr_scheduler_type"],
+      
         warmup_ratio=train_cfg["warmup_ratio"],  # removed by _safe_training_args if rejected
-        warmup_steps=warmup_steps,               # fallback if warmup_ratio rejected
+        warmup_steps=warmup_steps,      # fallback if warmup_ratio rejected
         bf16=use_bf16,
         fp16=use_fp16,
+      
         gradient_checkpointing=train_cfg["gradient_checkpointing"],
         gradient_checkpointing_kwargs={"use_reentrant": False},
+      
         logging_steps=train_cfg["logging_steps"],
         eval_strategy=train_cfg["eval_strategy"],
         save_strategy=train_cfg["save_strategy"],
+      
         load_best_model_at_end=train_cfg["load_best_model_at_end"],
         metric_for_best_model=train_cfg["metric_for_best_model"],
+      
         report_to="none",
+        max_length=cfg["student_slm"]["max_seq_length"],
+        completion_only_loss=True,
+        packing=False,
     )
     if device_mode == "local_cpu":
         training_kwargs["use_cpu"] = True
 
-    training_args = _safe_training_args(training_kwargs)
+    training_args = _safe_sft_config(training_kwargs)
     trainer       = _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg)
 
     logger.info("[trainer] Starting training ...")
@@ -277,85 +301,134 @@ def _load_cpu(model_id: str, cfg: dict):
 
 # ── Private: SFTTrainer builder ───────────────────────────────────────────────
 
-def _build_sft_trainer(model, tokenizer, train_ds, val_ds, training_args, cfg):
+def _build_sft_trainer(
+    model,
+    tokenizer,
+    train_ds,
+    val_ds,
+    training_args,
+    cfg,
+):
     """
-    Build SFTTrainer handling both old and new trl / transformers APIs.
+    Build SFTTrainer for prompt-completion training.
 
-    trl < 0.15  : SFTTrainer(tokenizer=..., max_seq_length=..., dataset_text_field=...)
-    trl >= 0.15 : 'tokenizer' renamed to 'processing_class'
+    Dataset format:
+        {
+            "prompt": [...system/user messages...],
+            "completion": [...assistant message...]
+        }
 
-    Strategy: try 'processing_class' first, fall back to 'tokenizer'.
-    Other unexpected kwargs are removed one at a time until the call succeeds.
+    SFTConfig(completion_only_loss=True) ensures that loss is
+    calculated only on completion tokens.
     """
     from trl import SFTTrainer
 
-    max_seq_len    = cfg["student_slm"]["max_seq_length"]
-    tokenizer_keys = ["processing_class", "tokenizer"]
+    tokenizer_keys = [
+        "processing_class",   # modern TRL
+        "tokenizer",          # older TRL
+    ]
 
     for tok_key in tokenizer_keys:
+
         kwargs = {
-            "model":              model,
-            tok_key:              tokenizer,
-            "train_dataset":      train_ds,
-            "eval_dataset":       val_ds,
-            "args":               training_args,
-            "max_seq_length":     max_seq_len,
-            "dataset_text_field": "text",
+            "model": model,
+            tok_key: tokenizer,
+            "train_dataset": train_ds,
+            "eval_dataset": val_ds,
+            "args": training_args,
         }
-        for _ in range(len(kwargs) + 1):
-            try:
-                trainer = SFTTrainer(**kwargs)
-                logger.info(f"[trainer] SFTTrainer built (tokenizer param='{tok_key}').")
-                return trainer
-            except TypeError as exc:
-                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
-                if not match:
-                    break   # non-param TypeError — try next tok_key
-                bad = match.group(1)
-                if bad == tok_key:
-                    logger.info(f"[trainer] SFTTrainer rejected '{tok_key}' — trying alternative.")
-                    break   # switch tokenizer key
-                logger.warning(f"[trainer] SFTTrainer rejected param '{bad}' — removing.")
-                kwargs.pop(bad, None)
+
+        try:
+            trainer = SFTTrainer(**kwargs)
+
+            logger.info(
+                f"[trainer] SFTTrainer built "
+                f"(tokenizer param='{tok_key}', "
+                f"prompt-completion dataset, "
+                f"completion-only loss)."
+            )
+
+            return trainer
+
+        except TypeError as exc:
+
+            # If this TRL version does not support processing_class,
+            # try legacy tokenizer argument.
+            if tok_key == "processing_class":
+                logger.info(
+                    "[trainer] SFTTrainer rejected "
+                    "'processing_class' — trying legacy 'tokenizer'."
+                )
+                continue
+
+            raise
 
     raise RuntimeError(
         "[trainer] Could not construct SFTTrainer.\n"
-        f"  trl={_ver('trl')}  transformers={_ver('transformers')}  "
+        f"  trl={_ver('trl')}  "
+        f"transformers={_ver('transformers')}  "
         f"Python={__import__('sys').version.split()[0]}"
     )
 
-
-# ── Private: safe TrainingArguments builder ───────────────────────────────────
-
-def _safe_training_args(training_kwargs: dict):
+def _safe_sft_config(training_kwargs: dict):
     """
-    Build TrainingArguments, removing any param the installed version rejects.
+    Build TRL SFTConfig while handling minor version differences.
 
-    Handles:
-    - Python 3.14 dataclass __init__ changes (e.g. warmup_ratio rejected)
-    - transformers 5.x param renames
-    - warmup_ratio → warmup_steps fallback (both included; ratio removed if rejected)
+    Unlike transformers.TrainingArguments, SFTConfig supports
+    completion_only_loss, which is required for prompt-completion
+    distillation training.
     """
-    from transformers import TrainingArguments
+    from trl import SFTConfig
 
-    kwargs   = dict(training_kwargs)
+    kwargs = dict(training_kwargs)
     max_iter = len(kwargs) + 1
 
     for _ in range(max_iter):
         try:
-            return TrainingArguments(**kwargs)
+            return SFTConfig(**kwargs)
+
         except TypeError as exc:
-            match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+            match = re.search(
+                r"unexpected keyword argument '([^']+)'",
+                str(exc),
+            )
+
             if not match:
                 raise
+
             bad = match.group(1)
+
+            # completion_only_loss is essential for this training design.
+            # Do NOT silently remove it.
+            if bad == "completion_only_loss":
+                raise RuntimeError(
+                    "[trainer] Installed TRL version does not support "
+                    "'completion_only_loss'. Upgrade TRL before training."
+                ) from exc
+
+            # Newer TRL uses max_length. Some older releases used
+            # max_seq_length instead.
+            if bad == "max_length":
+                logger.warning(
+                    "[trainer] SFTConfig rejected 'max_length'; "
+                    "trying legacy 'max_seq_length'."
+                )
+
+                kwargs["max_seq_length"] = kwargs.pop("max_length")
+                continue
+
             logger.warning(
-                f"[trainer] TrainingArguments rejected '{bad}' "
-                f"(transformers {_ver('transformers')}) — removing."
+                f"[trainer] SFTConfig rejected '{bad}' "
+                f"(trl {_ver('trl')}) — removing."
             )
+
             kwargs.pop(bad, None)
 
-    raise RuntimeError("[trainer] Could not build TrainingArguments.")
+    raise RuntimeError(
+        "[trainer] Could not build SFTConfig."
+    )
+
+
 
 
 # ── Private: target-modules resolver ─────────────────────────────────────────

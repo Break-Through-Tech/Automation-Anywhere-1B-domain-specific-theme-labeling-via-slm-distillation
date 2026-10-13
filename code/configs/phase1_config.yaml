@@ -29,7 +29,7 @@ pipeline:
 # ── Checkpointing ────────────────────────────────────────────────────────────
 # Set use_checkpoints: false to recompute everything from scratch.
 checkpoints:
-  use_checkpoints: true
+  use_checkpoints: false
   embeddings_file:   "checkpoints/phase1_embeddings.pkl"
   umap_file:         "checkpoints/phase1_umap.pkl"
   clustering_file:   "checkpoints/phase1_clustering.csv"
@@ -54,7 +54,7 @@ dataset:
   domain:        "IT"                              # IT | HR | CX
   # Bitext categories used as IT proxy:
   it_categories: ["ACCOUNT", "TECHNICAL_SUPPORT", "DELIVERY", "CONTACT"]
-  n_samples:     500                               # number of tickets to use
+  n_samples:     2000                               # number of tickets to use
   text_column:   "instruction"                     # Bitext's ticket text column
   label_column:  "category"                        # used for EDA only, not for training
 
@@ -75,6 +75,9 @@ clustering:
 
 # ── Top-k selection ───────────────────────────────────────────────────────────
 top_k: 10                                          # tickets per cluster for LLM input
+data_augmentation:
+  num_variants: 1
+  sample_size: 6
 
 # ── Frontier LLM (teacher) ────────────────────────────────────────────────────
 teacher_llm:
@@ -127,7 +130,7 @@ student_slm:
 lora:
   r:               16        # rank — controls adapter expressiveness
   lora_alpha:      16        # scaling factor (set equal to r as starting point)
-  lora_dropout:    0.05
+  lora_dropout:    0.1
   bias:            "none"
   target_modules:  "all-linear"
   task_type:       "CAUSAL_LM"
@@ -139,7 +142,7 @@ qlora:                       # used only in "colab" device_mode
 
 # ── Training (SFTConfig) ──────────────────────────────────────────────────────
 training:
-  num_train_epochs:              3
+  num_train_epochs:              1
   per_device_train_batch_size:   4
   gradient_accumulation_steps:   4        # effective batch size = 16
   learning_rate:                 2.0e-4
@@ -176,7 +179,7 @@ evaluation:
   # true            — inference on ALL clusters (train + val + test). Shows
   #                   training and validation metrics alongside test metrics,
   #                   enabling overfitting analysis in metrics_summary.csv.
-  eval_all_splits: false
+  eval_all_splits: true
 
   # ── Cosine similarity (PRIMARY metric — always runs) ──────────────────────
   embedding_model: "all-mpnet-base-v2"

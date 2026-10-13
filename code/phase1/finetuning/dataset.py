@@ -100,9 +100,19 @@ def build_dataset(cfg: dict, labeled_df: pd.DataFrame, tokenizer) -> dict:
     }
 
     for split_name, (cluster_set, filename) in splits.items():
+        # examples = _build_examples(
+        #     cluster_set, cluster_tickets, cluster_labels,
+        #     cfg, tokenizer, max_seq, domain,
+        # )
         examples = _build_examples(
-            cluster_set, cluster_tickets, cluster_labels,
-            cfg, tokenizer, max_seq, domain,
+            cluster_set,
+            cluster_tickets,
+            cluster_labels,
+            cfg,
+            tokenizer,
+            max_seq,
+            domain,
+            split_name,
         )
         path = out_dir / filename
         _write_jsonl(examples, path)
@@ -148,7 +158,7 @@ def load_split_clusters(cfg: dict, labeled_df: pd.DataFrame) -> dict:
     }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _build_examples(
     cluster_set: set,
@@ -158,53 +168,126 @@ def _build_examples(
     tokenizer,
     max_seq: int,
     domain: str,
+    split_name: str,
 ) -> list[dict]:
     """Build instruction-following examples for a set of clusters."""
-    from phase1.data.schema import PROMPT_IDS, cluster_name_col
+    from phase1.data.schema import PROMPT_IDS
     from phase1.prompts.templates import build_messages
 
-    model_id = cfg["teacher_llm"]["model"]
     examples = []
-    skipped  = 0
+    skipped = 0
+
+    # Separate RNG for augmentation
+    rng = random.Random(cfg["seed"] + 1000)
 
     for cid in sorted(cluster_set):
         if cid not in cluster_tickets or cid not in cluster_labels:
             continue
-        ticket_texts = cluster_tickets[cid]
-        labels       = cluster_labels[cid]
 
+        ticket_texts = cluster_tickets[cid]
+        labels = cluster_labels[cid]
+
+        # -----------------------------
+        # Train: augmentation
+        # -----------------------------
+        if split_name == "train":
+            aug_cfg = cfg["data_augmentation"]
+            num_variants = aug_cfg["num_variants"]
+            sample_size = aug_cfg["sample_size"]
+
+            actual_sample_size = min(
+                sample_size,
+                len(ticket_texts),
+            )
+
+            ticket_variants = []
+
+            for _ in range(num_variants):
+                sampled_indices = sorted(
+                    rng.sample(
+                        range(len(ticket_texts)),
+                        actual_sample_size,
+                    )
+                )
+
+                sampled_tickets = [
+                    ticket_texts[i]
+                    for i in sampled_indices
+                ]
+
+                ticket_variants.append(sampled_tickets)
+
+        # -----------------------------
+        # Val / Test: original top-k
+        # -----------------------------
+        else:
+            ticket_variants = [ticket_texts]
+
+        # -----------------------------
+        # P1-P5
+        # -----------------------------
         for prompt_id in PROMPT_IDS:
             if prompt_id not in labels:
                 continue
 
-            label    = labels[prompt_id]
-            messages = build_messages(prompt_id, ticket_texts, cfg, domain)
+            label = labels[prompt_id]
 
-            # Append the assistant turn (the gold label) for training
-            full_messages = messages + [{"role": "assistant", "content": label}]
+            for variant_id, variant_tickets in enumerate(ticket_variants):
 
-            # Apply model's chat template
-            text = tokenizer.apply_chat_template(
-                full_messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
+                messages = build_messages(
+                    prompt_id,
+                    variant_tickets,
+                    cfg,
+                    domain,
+                )
 
-            # Length check (skip if too long)
-            token_len = len(tokenizer.encode(text))
-            if token_len > max_seq:
-                skipped += 1
-                continue
 
-            examples.append({
-                "text":       text,
-                "cluster_id": int(cid),
-                "prompt_id":  prompt_id,
-            })
+
+
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+
+                completion_text = label
+
+                full_text = prompt_text + completion_text
+
+                encoded = tokenizer(
+                    full_text,
+                    add_special_tokens=False,
+                    truncation=False,
+                )
+                token_len = len(encoded["input_ids"])
+
+                if token_len > max_seq:
+                    skipped += 1
+                    continue
+
+                examples.append({
+                    "prompt":  prompt_text,
+                    "completion": completion_text,
+                    "cluster_id": int(cid),
+                    "prompt_id": prompt_id,
+                    "variant_id": variant_id,
+                })
+
+
+
+
+
+
+
+
+
+
+    
 
     if skipped > 0:
         logger.warning(
-            f"[dataset] Skipped {skipped} examples exceeding max_seq_length={max_seq}."
+            f"[dataset] Skipped {skipped} examples "
+            f"exceeding max_seq_length={max_seq}."
         )
 
     return examples
