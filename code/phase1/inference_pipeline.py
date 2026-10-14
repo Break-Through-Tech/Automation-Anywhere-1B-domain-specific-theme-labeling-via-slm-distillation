@@ -294,7 +294,7 @@ def _run_judge(generated: str, reference: str, ticket_texts: list[str],
     except Exception as e:
         logger.warning(f"[demo] Judge call failed: {e}")
         return {"faithfulness": 0, "specificity": 0, "equivalence": 0,
-                "composite": 0, "reasoning": "error"}
+                "composite_score": 0, "reasoning": "error"}
 
 
 def _print_live_comparison(
@@ -343,12 +343,12 @@ def _print_live_comparison(
          f"{base_scores['cos']:.3f}", f"{base_scores['rouge']:.3f}",
          _j(base_scores,"faithfulness"), _j(base_scores,"specificity"),
          _j(base_scores,"equivalence"),
-         f"{base_scores['judge'].get('composite',0):.2f}" if isinstance(base_scores.get('judge'),dict) else "—"],
+         f"{base_scores['judge'].get('composite_score',0):.2f}" if isinstance(base_scores.get('judge'),dict) else "—"],
         ["SLM Fine-tuned",
          f"{ft_scores['cos']:.3f}", f"{ft_scores['rouge']:.3f}",
          _j(ft_scores,"faithfulness"), _j(ft_scores,"specificity"),
          _j(ft_scores,"equivalence"),
-         f"{ft_scores['judge'].get('composite',0):.2f}" if isinstance(ft_scores.get('judge'),dict) else "—"],
+         f"{ft_scores['judge'].get('composite_score',0):.2f}" if isinstance(ft_scores.get('judge'),dict) else "—"],
     ]
     print(f"\n{'─'*68}  QUALITY SCORES (vs Teacher label)")
     headers = ["Model","Cosine","ROUGE-L","Faithful.","Specific.","Equiv.","Comp./5"]

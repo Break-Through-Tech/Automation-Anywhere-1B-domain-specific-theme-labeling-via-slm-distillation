@@ -1,8 +1,8 @@
 """
-2026.8.16
-2026.8.22
-5.5.0
-0.24.0
+2026.10.5
+2026.10.5
+5.17.0
+1.15.0
 __UNSLOTH_VERSIONING__
 """
 
@@ -29,8 +29,9 @@ from torch.nn import functional as F
 from unsloth_zoo.temporary_patches.common import torch_compile
 from unsloth_zoo.temporary_patches.common import _maybe_compile
 import functools
+import transformers
 from typing import Any, List, Optional, Tuple, Union, Dict, Set, Callable
-from trl.trainer.reward_trainer import (Any, AutoModelForSequenceClassification, AutoTokenizer, BaseTrainer, Callable, DataCollator, DataCollatorForPreference, Dataset, EvalPrediction, IterableDataset, Optional, PartialState, Path, PeftConfig, PreTrainedModel, PreTrainedTokenizerBase, RewardConfig, RewardTrainer, TrainerCallback, Union, clone_chat_template, contextlib, dataclass, defaultdict, disable_dropout_in_model, get_act_offloading_ctx_manager, is_conversational, logger, logging, nn, os, pad, re, remove_none_values, suppress_from_pretrained_warning, torch, transformers, Any, AutoModelForSequenceClassification, AutoTokenizer, Callable, DataCollator, DataCollatorForPreference, Dataset, EvalPrediction, IterableDataset, Optional, PeftConfig, PreTrainedModel, PreTrainedTokenizerBase, RewardConfig, TrainerCallback, Union, clone_chat_template, contextlib, defaultdict, disable_dropout_in_model, get_act_offloading_ctx_manager, logger, os, pad, re, suppress_from_pretrained_warning, torch, transformers, PreTrainedModel, logger, os, re, torch)
+from trl.trainer.reward_trainer import (Any, AutoModelForSequenceClassification, AutoTokenizer, BitsAndBytesConfig, Callable, DataCollator, DataCollatorForPreference, Dataset, DatasetDict, EvalPrediction, IterableDataset, IterableDatasetDict, Path, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, RewardConfig, RewardTrainer, TrainerCallback, Version, _BaseTrainer, _tokenize, accelerate, clone_chat_template, contextlib, create_model_from_path, dataclass, defaultdict, disable_dropout_in_model, get_act_offloading_ctx_manager, get_config_model_id, get_dataset_column_names, get_peft_model, global_then_local_main_first, is_conversational, is_peft_available, is_peft_model, json, logger, logging, nn, os, pad, re, set_seed, suppress_seqcls_warning, torch, transformers, warnings, Any, AutoModelForSequenceClassification, AutoTokenizer, BitsAndBytesConfig, Callable, DataCollator, DataCollatorForPreference, Dataset, DatasetDict, EvalPrediction, IterableDataset, IterableDatasetDict, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, RewardConfig, TrainerCallback, Version, accelerate, clone_chat_template, contextlib, create_model_from_path, defaultdict, disable_dropout_in_model, get_act_offloading_ctx_manager, get_config_model_id, get_peft_model, is_peft_available, is_peft_model, logger, os, pad, re, set_seed, suppress_seqcls_warning, torch, transformers, PeftModel, PreTrainedModel, is_peft_available, logger, os, re, torch)
 
 
 import os
@@ -46,7 +47,7 @@ from torch.nn import functional as F
 import inspect
 from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling as TransformersDataCollatorForLanguageModeling
 from transformers.training_args import ParallelMode
-from unsloth_zoo.device_type import DEVICE_TYPE, device_synchronize
+from unsloth_zoo.device_type import DEVICE_TYPE, DEVICE_TYPE_TORCH, device_synchronize
 
 # Wrap trainer with padding to right and enable training mode
 import functools
@@ -61,13 +62,23 @@ try:
     from unsloth.models._utils import _unsloth_reset_stray_compile_cache
 except Exception:
     def _unsloth_reset_stray_compile_cache(self): pass
+try:
+    from unsloth.models._utils import _unsloth_dataset_column_names
+except Exception:
+    def _unsloth_dataset_column_names(dataset): return dataset.column_names
 # Drops/renames config arguments the installed TRL no longer accepts, so a
 # script pinned to an older TRL keeps working after an upgrade. Falls back to
 # the historical raw passthrough so this can never break trainer construction.
 try:
     from unsloth.models.rl_config_compat import filter_config_init_kwargs as _unsloth_filter_config_init_kwargs
+    # A cache file generated here can be imported by an older Unsloth whose filter
+    # predates `mirrored_from`, so drop the argument rather than raise TypeError.
+    if "mirrored_from" not in inspect.signature(_unsloth_filter_config_init_kwargs).parameters:
+        _unsloth_filter_config_init_kwargs_old = _unsloth_filter_config_init_kwargs
+        def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw):
+            return _unsloth_filter_config_init_kwargs_old(config_class, kwargs)
 except Exception:
-    def _unsloth_filter_config_init_kwargs(config_class, kwargs): return kwargs
+    def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw): return kwargs
 def prepare_for_training_mode(f):
     @functools.wraps(f)
     def wrapper(self, *args, **kwargs):
@@ -161,6 +172,7 @@ def chunked_hidden_states_selective_log_softmax(
         if os.environ.get("UNSLOTH_GRPO_MAX_ROWS_PER_CHUNK", "0").strip().isdigit()
         else 0
     ),
+    lm_head_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # All Unsloth Zoo code licensed under AGPL3
     # Reshape on this tensor's own last dim: a no-op, so a wrong-width caller
@@ -185,8 +197,20 @@ def chunked_hidden_states_selective_log_softmax(
         chunks = max(chunks, -(-n_rows // max_rows_per_chunk))
         chunks = min(chunks, max(n_rows, 1))
 
-    chunked_hidden_states = torch.chunk(flat_hidden_states, chunks=chunks, dim=0)
-    chunked_index = torch.chunk(flat_index, chunks=chunks, dim=0)
+    # A one-row chunk's head gradient is a K=1 matmul Inductor mis-lowers under dynamic shapes (illegal
+    # memory access or NaN head gradients, torch 2.13), so keep chunks at 2+ rows when the head trains.
+    # Exactly `chunks` row ranges, so the unrolled loop length never depends on T: torch.chunk
+    # returns ceil(T / ceil(T / chunks)) pieces and recompiled per new count; tensor_split guards
+    # on T % chunks. At most rows // 2 chunks when the head trains keeps every piece at 2+ rows.
+    lm_head_grad = torch.is_grad_enabled() and lm_head.requires_grad
+    if lm_head_grad and flat_hidden_states.shape[0] < 2 * chunks:
+        chunks = max(flat_hidden_states.shape[0] // 2, 1)
+
+    n_rows = flat_hidden_states.shape[0]
+    chunks = max(1, min(chunks, n_rows))
+    bounds = [(i * n_rows) // chunks for i in range(chunks + 1)]
+    chunked_hidden_states = [flat_hidden_states[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    chunked_index = [flat_index[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
 
     all_per_token_logps = []
 
@@ -201,7 +225,10 @@ def chunked_hidden_states_selective_log_softmax(
         # bit-identical to before.
         chunk_hidden_states = chunk_hidden_states.to(device = lm_head.device, dtype = lm_head.dtype)
         chunk_index = chunk_index.to(lm_head.device)
-        chunk_logits = chunk_hidden_states @ lm_head.t()
+        if lm_head_bias is None:
+            chunk_logits = chunk_hidden_states @ lm_head.t()
+        else:
+            chunk_logits = torch.nn.functional.linear(chunk_hidden_states, lm_head, lm_head_bias)
 
         if logit_scale_multiply != 0.0:
             chunk_logits = chunk_logits * logit_scale_multiply
@@ -234,8 +261,14 @@ def chunked_selective_log_softmax(
     temperature: float = 1.0,
     chunks: int = 4,
 ):
-    chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = chunks, dim = 0)
-    chunked_index  = torch.chunk(index.reshape(-1), chunks = chunks, dim = 0)
+    # Fixed `chunks` row ranges; see chunked_hidden_states_selective_log_softmax.
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_index = index.reshape(-1)
+    # Fewer rows than chunks: one row per range, as torch.chunk did, never empty ranges.
+    chunks = max(1, min(chunks, flat_logits.shape[0]))
+    bounds = [(i * flat_logits.shape[0]) // chunks for i in range(chunks + 1)]
+    chunked_logits = [flat_logits[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    chunked_index  = [flat_index[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
     all_per_token_logps = []
     # Per-chunk selective_log_softmax.
     for chunk_logits, chunk_index in zip(chunked_logits, chunked_index):
@@ -399,7 +432,8 @@ def autotune_batch_and_chunks(
 
     if valid_indices.shape[0] == 0:
         #This means your GPU will OOM
-        return 4, final_m
+        # Capped at the row count: unsloth's no-grad pass divides rows by this without max(1, ...).
+        return max(1, min(4, total_input_rows)), final_m
 
     best_idx = valid_indices[0].item()
     final_b = int(b_vals[best_idx].item())
@@ -434,10 +468,13 @@ Parameters:
     > Parameters that control the model
 
     model_init_kwargs (`dict[str, Any]`, *optional*):
-        Keyword arguments for [`~transformers.AutoModelForCausalLM.from_pretrained`], used when the `model`
-        argument of the [`RewardTrainer`] is provided as a string. If you're training a MoE architecture and want
-        to include the load balancing/auxilliary loss as a part of the final loss, remember to set
-        `output_router_logits=True` in this dictionary.
+        Keyword arguments for [`~transformers.AutoModelForSequenceClassification.from_pretrained`], used when the
+        `model` argument of the [`RewardTrainer`] is provided as a string. The `revision` value is also used when
+        loading the tokenizer.
+    trust_remote_code (`bool`, *optional*, defaults to `False`):
+        Whether to allow loading models and tokenizers that ship custom Python code from the Hub. Forwarded to
+        [`~transformers.AutoModelForSequenceClassification.from_pretrained`] and
+        [`~transformers.AutoTokenizer.from_pretrained`].
     chat_template_path (`str`, *optional*):
         If specified, sets the model's chat template. This can either be the path to a tokenizer (local directory
         or Hugging Face Hub model) or a direct path to a Jinja template file. When using a Jinja file, you must
@@ -453,9 +490,6 @@ Parameters:
     eos_token (`str`, *optional*):
         Token used to indicate the end of a turn or sequence. If `None`, it defaults to
         `processing_class.eos_token`.
-    pad_token (`str`, *optional*):
-        Token used for padding. If `None`, it defaults to `processing_class.pad_token`, or if that is also `None`,
-        it falls back to `processing_class.eos_token`.
     max_length (`int` or `None`, *optional*, defaults to `1024`):
         Maximum length of the tokenized sequence. Samples are filtered out if either chosen or rejected sequence
         exceeds this value. If `None`, no filtering is applied.
@@ -465,10 +499,28 @@ Parameters:
     > Parameters that control the training
 
     center_rewards_coefficient (`float`, *optional*):
-        Coefficient to incentivize the reward model to output mean-zero rewards (proposed by
-        https://huggingface.co/papers/2312.09244, Eq. 2). Recommended value: `0.01`.
+        Coefficient to incentivize the reward model to output mean-zero rewards (proposed by [this
+        paper](https://huggingface.co/papers/2312.09244), Eq. 2). Recommended value: `0.01`.
     activation_offloading (`bool`, *optional*, defaults to `False`):
         Whether to offload the activations to the CPU.
+
+    > Deprecated parameters
+
+    pad_token:
+
+        <Deprecated version="1.1.0">
+
+        Parameter `pad_token` is deprecated and will be removed in version v2.0.0. Set `tokenizer.pad_token`
+        directly and pass it as `processing_class` to the trainer instead.
+
+        </Deprecated>
+
+> [!NOTE]
+> These parameters have default values different from [`~transformers.TrainingArguments`]:
+> - `logging_steps`: Defaults to `10` instead of `500`.
+> - `gradient_checkpointing`: Defaults to `True` instead of `False`.
+> - `bf16`: Defaults to `True` if `fp16` is not set, instead of `False`.
+> - `learning_rate`: Defaults to `1e-4` instead of `5e-5`.
 
     """
     vllm_sampling_params: Optional[Any] = field(
@@ -540,7 +592,9 @@ Parameters:
         report_to = 'none',
         run_name = None,
         project = 'huggingface',
-        trackio_space_id = 'trackio',
+        trackio_space_id = None,
+        trackio_bucket_id = None,
+        trackio_static_space_id = None,
         eval_strategy = 'no',
         eval_steps = None,
         eval_delay = 0,
@@ -571,7 +625,7 @@ Parameters:
         restore_callback_states_from_checkpoint = False,
         full_determinism = False,
         seed = 3407,
-        data_seed = 3407,
+        data_seed = None,
         use_cpu = False,
         accelerator_config = None,
         parallelism_config = None,
@@ -580,6 +634,8 @@ Parameters:
         dataloader_pin_memory = True,
         dataloader_persistent_workers = False,
         dataloader_prefetch_factor = None,
+        dataloader_multiprocessing_context = None,
+        dataloader_in_order = True,
         remove_unused_columns = True,
         label_names = None,
         train_sampling_strategy = 'random',
@@ -587,6 +643,7 @@ Parameters:
         ddp_find_unused_parameters = None,
         ddp_bucket_cap_mb = None,
         ddp_broadcast_buffers = None,
+        ddp_static_graph = None,
         ddp_backend = None,
         ddp_timeout = 1800,
         fsdp = None,
@@ -598,19 +655,18 @@ Parameters:
         do_eval = False,
         do_predict = False,
         resume_from_checkpoint = None,
-        warmup_ratio = None,
-        logging_dir = None,
         local_rank = -1,
         model_init_kwargs = None,
+        trust_remote_code = False,
         chat_template_path = None,
         disable_dropout = True,
         dataset_num_proc = None,
         eos_token = None,
-        pad_token = None,
         max_length = 1024,
         pad_to_multiple_of = None,
         center_rewards_coefficient = None,
         activation_offloading = False,
+        pad_token = None,
         vllm_sampling_params = None,
         unsloth_num_chunks = -1,
         unsloth_logit_chunk_multiplier = None,
@@ -620,6 +676,22 @@ Parameters:
     ):
         if learning_rate < 1e-7: print(f'Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!')
         if learning_rate > 1: print(f'Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!')
+        _unsloth_fsdp2 = os.environ.get('FSDP_VERSION', '').strip() == '2'
+        _unsloth_fsdp_cfg = fsdp_config
+        if fsdp and isinstance(_unsloth_fsdp_cfg, str) and os.path.isfile(_unsloth_fsdp_cfg):
+            try:
+                import json as _unsloth_json
+                with open(_unsloth_fsdp_cfg, encoding = 'utf-8') as _unsloth_f:
+                    _unsloth_fsdp_cfg = _unsloth_json.load(_unsloth_f)
+            except Exception:
+                _unsloth_fsdp_cfg = None
+        if fsdp and _unsloth_fsdp_cfg is None:
+            _unsloth_fsdp_cfg = {}
+        if fsdp and isinstance(_unsloth_fsdp_cfg, dict):
+            _unsloth_fsdp2 = _unsloth_fsdp2 or str(_unsloth_fsdp_cfg.get('fsdp_version', _unsloth_fsdp_cfg.get('version', 2))) == '2'
+        if _unsloth_fsdp2 and str(getattr(optim, 'value', optim)) == 'adamw_8bit':
+            print("Unsloth: FSDP2 shards parameters as DTensors, which bitsandbytes' 8-bit optimizers cannot step. Switching optim = 'adamw_8bit' to 'adamw_torch_fused'.")
+            optim = 'adamw_torch_fused'
         if num_train_epochs is None:
             num_train_epochs = 3.0  # Default to 3 epochs if None, max_steps will override
         if output_dir is None and save_strategy == 'steps' and save_steps == 500:
@@ -639,6 +711,9 @@ Parameters:
             if HAS_FLEX_ATTENTION and pad_to_multiple_of is None:
                 from unsloth_zoo.flex_attention import FLEX_ATTENTION_BLOCK_SIZE
                 pad_to_multiple_of = FLEX_ATTENTION_BLOCK_SIZE
+        
+        if eval_steps is not None and eval_strategy != 'steps':
+            print(f'Unsloth: `eval_steps = {eval_steps}` is ignored because `eval_strategy` is {getattr(eval_strategy, "value", eval_strategy)!r}. Set `eval_strategy = "steps"` to evaluate every `eval_steps` steps.')
         
         
         # One dict so the filter sees the mirrored parameters AND `**kwargs`:
@@ -693,6 +768,8 @@ Parameters:
             run_name = run_name,
             project = project,
             trackio_space_id = trackio_space_id,
+            trackio_bucket_id = trackio_bucket_id,
+            trackio_static_space_id = trackio_static_space_id,
             eval_strategy = eval_strategy,
             eval_steps = eval_steps,
             eval_delay = eval_delay,
@@ -732,6 +809,8 @@ Parameters:
             dataloader_pin_memory = dataloader_pin_memory,
             dataloader_persistent_workers = dataloader_persistent_workers,
             dataloader_prefetch_factor = dataloader_prefetch_factor,
+            dataloader_multiprocessing_context = dataloader_multiprocessing_context,
+            dataloader_in_order = dataloader_in_order,
             remove_unused_columns = remove_unused_columns,
             label_names = label_names,
             train_sampling_strategy = train_sampling_strategy,
@@ -739,6 +818,7 @@ Parameters:
             ddp_find_unused_parameters = ddp_find_unused_parameters,
             ddp_bucket_cap_mb = ddp_bucket_cap_mb,
             ddp_broadcast_buffers = ddp_broadcast_buffers,
+            ddp_static_graph = ddp_static_graph,
             ddp_backend = ddp_backend,
             ddp_timeout = ddp_timeout,
             fsdp = fsdp,
@@ -750,20 +830,19 @@ Parameters:
             do_eval = do_eval,
             do_predict = do_predict,
             resume_from_checkpoint = resume_from_checkpoint,
-            warmup_ratio = warmup_ratio,
-            logging_dir = logging_dir,
             local_rank = local_rank,
             model_init_kwargs = model_init_kwargs,
+            trust_remote_code = trust_remote_code,
             chat_template_path = chat_template_path,
             disable_dropout = disable_dropout,
             dataset_num_proc = dataset_num_proc,
             eos_token = eos_token,
-            pad_token = pad_token,
             max_length = max_length,
             pad_to_multiple_of = pad_to_multiple_of,
             center_rewards_coefficient = center_rewards_coefficient,
-            activation_offloading = activation_offloading,**kwargs)
-        super().__init__(**_unsloth_filter_config_init_kwargs(RewardConfig, _unsloth_config_arguments))
+            activation_offloading = activation_offloading,
+            pad_token = pad_token,**kwargs)
+        super().__init__(**_unsloth_filter_config_init_kwargs(RewardConfig, _unsloth_config_arguments, mirrored_from = __class__))
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
         if unsloth_grpo_mini_batch is not None:
@@ -776,10 +855,16 @@ Parameters:
                 )
         self.unsloth_logit_chunk_multiplier = unsloth_logit_chunk_multiplier
         self.max_seq_length = max_seq_length
+        # Unsloth: keep the reentrant checkpoint path
+        if getattr(self, 'gradient_checkpointing', False):
+            _gc_kwargs = getattr(self, 'gradient_checkpointing_kwargs', None) or {}
+            if _gc_kwargs.get('context_fn') is None and not _gc_kwargs.get('debug', False):
+                _gc_kwargs['use_reentrant'] = True
+                self.gradient_checkpointing_kwargs = _gc_kwargs
 
 pass
 
-class _UnslothRewardTrainer(BaseTrainer):
+class _UnslothRewardTrainer(_BaseTrainer):
     """
     Trainer for Outcome-supervised Reward Models (ORM).
 
@@ -788,25 +873,31 @@ class _UnslothRewardTrainer(BaseTrainer):
     Example:
 
     ```python
-    from trl import RewardTrainer
-    from datasets import load_dataset
+    >>> from trl import RewardTrainer
+    >>> from datasets import load_dataset
 
-    dataset = load_dataset("trl-lib/ultrafeedback_binarized", split="train")
+    >>> dataset = load_dataset("trl-lib/ultrafeedback_binarized", split="train")
 
-    trainer = RewardTrainer(model="Qwen/Qwen2.5-0.5B-Instruct", train_dataset=dataset)
-    trainer.train()
+    >>> trainer = RewardTrainer(
+    ...     model="Qwen/Qwen2.5-0.5B-Instruct",
+    ...     train_dataset=dataset,
+    ... )
+    >>> trainer.train()
     ```
 
     Args:
-        model (`Union[str, PreTrainedModel]`):
+        model (`str` or [`~transformers.PreTrainedModel`] or [`~peft.PeftModel`]):
             Model to be trained. Can be either:
 
             - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or a
               path to a *directory* containing model weights saved using
               [`~transformers.PreTrainedModel.save_pretrained`], e.g., `'./my_model_directory/'`. The model is loaded
               using `AutoModelForSequenceClassification.from_pretrained` with the keyword arguments in
-              `args.model_init_kwargs`.
+              `args.model_init_kwargs`. If `dtype` is not specified in `args.model_init_kwargs`, it defaults to
+              `float32`. This differs from [`~transformers.PreTrainedModel.from_pretrained`], where (since Transformers
+              v5) the dtype is inferred from the model config.
             - A sequence classification [`~transformers.PreTrainedModel`] object.
+            - A sequence classification [`~peft.PeftModel`] object.
         args ([`RewardConfig`], *optional*):
             Configuration for this trainer. If `None`, a default configuration is used.
         data_collator ([`~transformers.DataCollator`], *optional*):
@@ -820,9 +911,13 @@ class _UnslothRewardTrainer(BaseTrainer):
             - [Conversational](dataset_formats#conversational): Each sample contains structured messages (e.g., role
               and content).
 
-            The trainer also supports processed datasets (tokenized) as long as they contain an `chosen_input_ids` and
-            `rejected_input_ids` fields.
-        eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Union[Dataset, IterableDataset]]`):
+            The trainer also supports processed datasets (tokenized) as long as they contain `chosen_ids` and
+            `rejected_ids` fields.
+
+            When `train_dataset` is an [`~datasets.IterableDataset`] (e.g. a streaming dataset), `max_steps` must be
+            set in the training arguments, since its length cannot be inferred and the total number of training steps
+            is required to bound the training loop and configure the learning rate scheduler.
+        eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`], [`~datasets.DatasetDict`], [`~datasets.IterableDatasetDict`] or `dict[str, Dataset | IterableDataset]`):
             Dataset to use for evaluation. It must meet the same requirements as `train_dataset`.
         processing_class ([`~transformers.PreTrainedTokenizerBase`], *optional*):
             Tokenizer used to process the data. If `None`, the tokenizer is loaded from the model's name with
@@ -842,7 +937,7 @@ class _UnslothRewardTrainer(BaseTrainer):
 
             If you want to remove one of the default callbacks used, use the [`~transformers.Trainer.remove_callback`]
             method.
-        optimizers (`tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]]`, *optional*, defaults to `(None, None)`):
+        optimizers (`tuple[torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None]`, *optional*, defaults to `(None, None)`):
             A tuple containing the optimizer and the scheduler to use. Will default to an instance of `AdamW` on your
             model and a scheduler given by [`~transformers.get_linear_schedule_with_warmup`] controlled by `args`.
         optimizer_cls_and_kwargs (`tuple[Type[torch.optim.Optimizer], Dict[str, Any]]`, *optional*):
@@ -857,11 +952,17 @@ class _UnslothRewardTrainer(BaseTrainer):
             by this function will be reflected in the predictions received by `compute_metrics`.
 
             Note that the labels (second parameter) will be `None` if the dataset does not have them.
+        quantization_config ([`~transformers.BitsAndBytesConfig`], *optional*):
+            Quantization configuration used when loading the model from a model identifier. Combine with `peft_config`
+            for QLoRA training. Ignored if the model is already instantiated, or if `quantization_config` is also set
+            in `args.model_init_kwargs`.
         peft_config ([`~peft.PeftConfig`], *optional*):
             PEFT configuration used to wrap the model. If `None`, the model is not wrapped. Note that if the loaded
             model is a causal LM, it's highly recommended to set `modules_to_save=["score"]` in the PEFT configuration
             to ensure that the reward head is properly trained.
     """
+
+    loss_is_scaled_for_ga = False
 
     _tag_names = ["trl", "reward-trainer"]
     _name = "Reward"
@@ -869,64 +970,109 @@ class _UnslothRewardTrainer(BaseTrainer):
 
     def __init__(
         self,
-        model: Union[str, PreTrainedModel],
-        args: Optional[RewardConfig] = None,
-        data_collator: Optional[DataCollator] = None,
-        train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
-        eval_dataset: Optional[Union[Dataset, dict[str, Dataset]]] = None,
-        processing_class: Optional[PreTrainedTokenizerBase] = None,
-        compute_metrics: Optional[Callable[[EvalPrediction], dict]] = None,
-        callbacks: Optional[list[TrainerCallback]] = None,
-        optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
-        optimizer_cls_and_kwargs: Optional[tuple[type[torch.optim.Optimizer], dict[str, Any]]] = None,
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        peft_config: Optional["PeftConfig"] = None,
+        model: "str | PreTrainedModel | PeftModel",
+        args: RewardConfig | None = None,
+        data_collator: DataCollator | None = None,
+        train_dataset: Dataset | IterableDataset | None = None,
+        eval_dataset: Dataset
+        | IterableDataset
+        | DatasetDict
+        | IterableDatasetDict
+        | dict[str, Dataset | IterableDataset]
+        | None = None,
+        processing_class: PreTrainedTokenizerBase | None = None,
+        compute_metrics: Callable[[EvalPrediction], dict] | None = None,
+        callbacks: list[TrainerCallback] | None = None,
+        optimizers: tuple[torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None] = (None, None),
+        optimizer_cls_and_kwargs: tuple[type[torch.optim.Optimizer], dict[str, Any]] | None = None,
+        preprocess_logits_for_metrics: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+        quantization_config: "BitsAndBytesConfig | None" = None,
+        peft_config: "PeftConfig | None" = None,
     ):
         # Args
         if args is None:
-            model_name = model if isinstance(model, str) else model.config._name_or_path
+            model_name = model if isinstance(model, str) else get_config_model_id(model.config)
             model_name = model_name.split("/")[-1]
             args = RewardConfig(f"{model_name}-Reward")
 
-        # Model
-        model_init_kwargs = args.model_init_kwargs or {}
-        if isinstance(model, str):
-            model_id = model
-            dtype = model_init_kwargs.get("dtype")
-            if isinstance(dtype, torch.dtype) or dtype == "auto" or dtype is None:
-                pass  # dtype is already a torch.dtype or "auto" or None
-            elif isinstance(dtype, str) and dtype in ["bfloat16", "float16", "float32"]:
-                model_init_kwargs["dtype"] = getattr(torch, dtype)
-            else:
-                raise ValueError(
-                    "Invalid `dtype` passed to `RewardConfig`. Expected either 'auto' or a string representing "
-                    f"a valid `torch.dtype` (e.g., 'float32'), but got {dtype}."
+        if train_dataset is None:
+            raise ValueError("`train_dataset` is required")
+        elif isinstance(train_dataset, IterableDataset):
+            # IterableDataset requires dispatch_batches=False because Accelerate's dispatch mode may try to concatenate
+            # batches from multiple processes, leading to mismatch errors.
+            if args.accelerator_config.dispatch_batches is True:
+                logger.warning(
+                    "You are using an `IterableDataset` for training with `dispatch_batches=True`. `dispatch_batches` "
+                    "is forced to `False` when using an `IterableDataset`. To remove this warning, unset "
+                    "`dispatch_batches` in `RewardConfig` or set it to `False`."
                 )
-            with suppress_from_pretrained_warning(transformers.modeling_utils.logger):
-                model = AutoModelForSequenceClassification.from_pretrained(model_id, num_labels=1, **model_init_kwargs)
+            args.accelerator_config.dispatch_batches = False
+        elif not isinstance(train_dataset, Dataset):
+            raise TypeError(
+                f"`train_dataset` must be a `Dataset` or `IterableDataset`, got `{type(train_dataset).__name__}`."
+            )
+
+        # Model
+        # As AutoModelForSequenceClassification.from_pretrained[] will add a random head for the model, set_seed must
+        # be done before loading the model to ensure reproducibility.
+        set_seed(args.seed)
+        if isinstance(model, str):
+            model_init_kwargs = dict(args.model_init_kwargs or {})  # copy to avoid mutating model_init_kwargs
+            if quantization_config is not None:
+                if "quantization_config" in model_init_kwargs:
+                    raise ValueError(
+                        "You set `quantization_config` both as a trainer argument and in `args.model_init_kwargs`. "
+                        "Please set it in only one place, preferably as a trainer argument."
+                    )
+                model_init_kwargs["quantization_config"] = quantization_config
+            # Distributed training requires device_map=None ["auto" fails]
+            if args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
+                model_init_kwargs["device_map"] = None
+            model_init_kwargs["num_labels"] = 1  # the only output of the model is the reward score
+            model_init_kwargs.setdefault("trust_remote_code", args.trust_remote_code)
+            model_revision = model_init_kwargs.get("revision")
+            with suppress_seqcls_warning():
+                model = create_model_from_path(model, AutoModelForSequenceClassification, **model_init_kwargs)
         else:
-            model_id = model.config._name_or_path
+            model_revision = None
             if args.model_init_kwargs is not None:
                 logger.warning(
                     "You passed `model_init_kwargs` to the `RewardConfig`, but your model is already instantiated. "
                     "The `model_init_kwargs` will be ignored."
                 )
+            if quantization_config is not None:
+                logger.warning(
+                    "You passed `quantization_config` to the trainer, but your model is already instantiated. The "
+                    "`quantization_config` will be ignored."
+                )
+            # Validate that the model has num_labels = 1 [required for reward models]
+            if getattr(model.config, "num_labels", None) != 1:
+                raise ValueError(
+                    f"The model has `num_labels={model.config.num_labels}`, but reward models require `num_labels=1` "
+                    "to output a single scalar reward per sequence. Please instantiate your model with `num_labels=1` "
+                    "or pass a model name as a string to have it configured automatically."
+                )
+        # Non-quantized models do not have the `is_loaded_in_{8,4}bit` attributes, whereas quantized models do
+        _is_quantized_model = getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False)
 
         # Processing class
         if processing_class is None:
-            processing_class = AutoTokenizer.from_pretrained(model_id)
+            processing_class = AutoTokenizer.from_pretrained(
+                get_config_model_id(model.config), revision=model_revision, trust_remote_code=args.trust_remote_code
+            )
 
         # Handle pad token for processors or tokenizers
         if args.eos_token is not None:
-            eos_token = args.eos_token
-            eos_token_id = processing_class.convert_tokens_to_ids(eos_token)
-            if eos_token_id is None:
+            if args.eos_token not in processing_class.get_vocab():
                 raise ValueError(
-                    f"The specified `eos_token` ('{eos_token}') is not found in the vocabulary of the given "
+                    f"The specified `eos_token` ('{args.eos_token}') is not found in the vocabulary of the given "
                     f"`processing_class` ({processing_class.__class__.__name__}). Ensure that the `eos_token` exists "
                     "in the vocabulary before using it as an EOS token."
                 )
-            processing_class.eos_token_id = eos_token_id
+            processing_class.eos_token = args.eos_token
+            # The model must agree with the tokenizer on the eos token from construction, so mirror it onto the model
+            # config [a sequence classification model has no generation config].
+            model.config.get_text_config().eos_token_id = processing_class.eos_token_id
 
         if args.chat_template_path is not None:
             if os.path.isfile(args.chat_template_path) and args.chat_template_path.endswith((".jinja", ".j2")):
@@ -940,8 +1086,24 @@ class _UnslothRewardTrainer(BaseTrainer):
         else:
             added_tokens = []
 
-        # PEFT configuration and model wrapping
+        # PEFT
         if False:
+            if not is_peft_available():
+                raise ImportError(
+                    "You passed `peft_config` but the `peft` library is not installed. "
+                    "Install it with `pip install trl[peft]`."
+                )
+            if not isinstance(peft_config, PeftConfig):
+                raise TypeError(
+                    f"`peft_config` must be a `peft.PeftConfig` instance (e.g. `peft.LoraConfig`), "
+                    f"got {type(peft_config).__name__}."
+                )
+            if is_peft_model(model):
+                raise ValueError(
+                    "You passed a `PeftModel` instance together with a `peft_config` to the trainer. Please first merge "
+                    "and unload the existing adapter, save the resulting base model, and then pass that base model along "
+                    "with the new `peft_config` to the trainer."
+                )
             if added_tokens:
                 # Ensure that the added tokens are trainable
                 if peft_config.trainable_token_indices is None:
@@ -950,7 +1112,6 @@ class _UnslothRewardTrainer(BaseTrainer):
                     peft_config.trainable_token_indices["embed_tokens"] = added_tokens
                 else:
                     peft_config.trainable_token_indices["embed_tokens"].extend(added_tokens)
-
                 # Ensure that the lm_head is trainable
                 if peft_config.modules_to_save is None or "lm_head" not in peft_config.modules_to_save:
                     logger.warning(
@@ -964,9 +1125,56 @@ class _UnslothRewardTrainer(BaseTrainer):
                         peft_config.modules_to_save = ["lm_head"]
                     else:
                         peft_config.modules_to_save.append("lm_head")
+            # Create PEFT model
+            # ZeRO-3 + PEFT for non-quantized models:
+            # - PEFT's default autocast_adapter_dtype=True upcasts LoRA adapter params to fp32 even when the base model is bf16.
+            # - ZeRO-3's _allgather_params_coalesced allocates output buffers using the dtype of the first persistent parameter,
+            #   so mixed-dtype persistent_parameters [bf16 base + fp32 LoRA] cause a TypeError on the first optimizer step.
+            # - Passing autocast_adapter_dtype=False keeps adapter params in the base model dtype [bf16], fixing the mismatch.
+            # - This is safe: the fp32 upcast is a QLoRA-specific concern [low-bit quantized base models], not needed for
+            #   non-quantized bf16 training.
+            # - See:
+            #   - TRL issue: https://github.com/huggingface/trl/issues/6089
+            #   - Upstream issue: https://github.com/deepspeedai/DeepSpeed/issues/8072
+            get_peft_model_kwargs = {}
+            if args.deepspeed_plugin is not None and args.deepspeed_plugin.zero_stage == 3 and not _is_quantized_model:
+                get_peft_model_kwargs["autocast_adapter_dtype"] = False
+            model = get_peft_model(model, peft_config, **get_peft_model_kwargs)
 
+        # PEFT + DeepSpeed ZeRO-3 requires reentrant checkpointing. For more details, see
+        # https://github.com/huggingface/trl/issues/2514#issuecomment-2692152703.
+        # Can be removed once https://github.com/deepspeedai/DeepSpeed/pull/8130 is merged and released.
+        if (
+            is_peft_model(model)
+            and args.deepspeed_plugin is not None
+            and args.deepspeed_plugin.zero_stage == 3
+            and args.gradient_checkpointing
+        ):
+            args.gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
+            use_reentrant = args.gradient_checkpointing_kwargs.get("use_reentrant")
+            if use_reentrant is False:
+                logger.warning(
+                    "You are using PEFT with DeepSpeed ZeRO-3 and gradient checkpointing with `use_reentrant=False`. "
+                    "`use_reentrant` is forced to `True` in this configuration to ensure correct training. To remove "
+                    "this warning, unset `use_reentrant` in `gradient_checkpointing_kwargs` or set it to `True`."
+                )
+            args.gradient_checkpointing_kwargs["use_reentrant"] = True
+
+        # When using gradient checkpointing with PEFT, we need to enable input gradients. transformers.Trainer normally
+        # handles this, but a bug currently prevents it; see https://github.com/huggingface/transformers/issues/42489
+        if is_peft_model(model) and args.gradient_checkpointing:
+            model.enable_input_require_grads()
+
+        # When using QLoRA, the PEFT adapter weights are converted to bf16 to follow the recommendations from the
+        # original paper [see https://huggingface.co/papers/2305.14314, paragraph 3]. Normally, this can be done by
+        # passing `autocast_adapter_dtype=False` to `get_peft_model`, but this option is not yet supported for
+        # quantized models. See: https://github.com/huggingface/peft/issues/2889
+        # The DoRA magnitude vector is excluded: unlike LoRA A/B, its optimizer updates can be smaller than bf16 can
+        # represent, silently freezing it, see #7268.
         if False:
-            pass
+            for name, param in model.named_parameters():
+                if param.requires_grad and "lora_magnitude_vector" not in name:
+                    param.data = param.data.to(torch.bfloat16)
 
         # Disable dropout in the model
         if args.disable_dropout:
@@ -976,20 +1184,20 @@ class _UnslothRewardTrainer(BaseTrainer):
         # If not provided, use the one from the processing class or the eos token if the processing class does not have
         # a pad token.
         pad_token = args.pad_token or processing_class.pad_token or processing_class.eos_token
-        pad_token_id = processing_class.convert_tokens_to_ids(pad_token)
-        if pad_token_id is None:
+        if pad_token not in processing_class.get_vocab():
             raise ValueError(
                 f"The specified `pad_token` ('{pad_token}') is not found in the vocabulary of the given "
                 f"`processing_class` ({processing_class.__class__.__name__}). Ensure that the `pad_token` exists "
                 "in the vocabulary before using it as a padding token."
             )
-        model.config.pad_token_id = pad_token_id
-        processing_class.pad_token_id = pad_token_id
+        processing_class.pad_token = pad_token
+        # SequenceClassification models need `config.pad_token_id` to locate the last non-pad token.
+        model.config.get_text_config().pad_token_id = processing_class.pad_token_id
 
         # Data collator
         if data_collator is None:
             data_collator = DataCollatorForPreference(
-                pad_token_id=pad_token_id,
+                pad_token_id=processing_class.pad_token_id,
                 pad_to_multiple_of=args.pad_to_multiple_of,
             )
 
@@ -1004,15 +1212,13 @@ class _UnslothRewardTrainer(BaseTrainer):
             else:
                 eval_dataset = self._prepare_dataset(eval_dataset, processing_class, args, "eval")
 
-        # Initialize the metrics
-        self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        self._total_train_tokens = 0
-
-        # Initialize the Trainer. Parent class will handle:
-        # - DeepSpeed configuration [through create_accelerator_and_postprocess]
-        # - FSDP setup
-        # - Distributed training setup
-        # - Optimizer and scheduler creation
+        # Transformers explicitly set use_reentrant=True in the past to silence a PyTorch warning, but the default was
+        # never updated once PyTorch switched to recommending use_reentrant=False. Until that change lands upstream
+        # [see https://github.com/huggingface/transformers/pull/43203] and is released [most likely in 5.0.0], we
+        # default to the recommended non-reentrant behavior here, while preserving any user-provided value.
+        if args.gradient_checkpointing and Version(transformers.__version__) < Version("5.0.0"):
+            args.gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
+            args.gradient_checkpointing_kwargs.setdefault("use_reentrant", False)
 
         super().__init__(
             model=model,
@@ -1038,36 +1244,51 @@ class _UnslothRewardTrainer(BaseTrainer):
         else:
             self.maybe_activation_offload_context = contextlib.nullcontext()
 
-        # Add tags for models that have been loaded with the correct transformers version
-        if hasattr(self.model, "add_model_tags"):
-            self.model.add_model_tags(self._tag_names)
+        # Initialize the metrics
+        self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+        self._total_train_tokens = 0
 
-        self.aux_loss_enabled = getattr(model.config, "output_router_logits", False)
+        # Tensor parallel ranks are given the same batch, so a token count gathered across all processes repeats
+        # every token once per rank in the group. Context and sequence parallelism shard the batch before the loss is
+        # computed, so they need no such correction. `parallelism_config` requires accelerate 1.12.0.
+        if Version(accelerate.__version__) >= Version("1.12.0") and self.accelerator.parallelism_config is not None:
+            self._tp_size = self.accelerator.parallelism_config.tp_size
+        else:
+            self._tp_size = 1
+
+        # Add tags to the model
+        self.model.add_model_tags(self._tag_names)
 
     def _prepare_dataset(
         self,
-        dataset: Union[Dataset, IterableDataset],
+        dataset: Dataset | IterableDataset,
         processing_class: PreTrainedTokenizerBase,
         args: RewardConfig,
         dataset_name: str,
-    ) -> Union[Dataset, IterableDataset]:
-        # Tabular backends like Arrow/Parquet insert `None` for mismatched keys in nested structures. Clean them from
-        # sampled data.
-        if isinstance(dataset, Dataset):  # IterableDataset does not support `with_transform`
-            dataset = dataset.with_transform(remove_none_values)
-
+    ) -> Dataset | IterableDataset:
         # If the dataset is already preprocessed (tokenized), skip the processing steps.
-        column_names = list(next(iter(dataset)).keys())
-        is_processed = "chosen_input_ids" in column_names and "rejected_input_ids" in column_names
+        column_names = get_dataset_column_names(dataset)
+        is_processed = "chosen_ids" in column_names and "rejected_ids" in column_names
+        has_legacy_processed_columns = "chosen_input_ids" in column_names and "rejected_input_ids" in column_names
+        if has_legacy_processed_columns and not is_processed:
+            warnings.warn(
+                "Detected legacy dataset columns `chosen_input_ids`/`rejected_input_ids`; they are deprecated and "
+                "will not be supported in v1. Please migrate to `chosen_ids`/`rejected_ids`.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            dataset = dataset.rename_column("chosen_input_ids", "chosen_ids")
+            dataset = dataset.rename_column("rejected_input_ids", "rejected_ids")
+            is_processed = True
 
         # Build the kwargs for the `map` function
         map_kwargs = {}
         if isinstance(dataset, Dataset):  # IterableDataset does not support num_proc
             map_kwargs["num_proc"] = args.dataset_num_proc
 
-        with PartialState().main_process_first():
+        with global_then_local_main_first():
             if not is_processed:
-                # Add EOS token to the end of the sequences if needed
+                # Add EOS token if needed: non-conversational only
                 first_example = next(iter(dataset))
                 if not is_conversational(first_example):
                     if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
@@ -1091,26 +1312,29 @@ class _UnslothRewardTrainer(BaseTrainer):
                     map_kwargs["desc"] = f"Tokenizing {dataset_name} dataset"
 
                 def tokenize_fn(example, processing_class):
+                    tools = example.get("tools")
+                    tools = json.loads(tools) if isinstance(tools, str) else tools
+                    apply_chat_template_kwargs = {"tools": tools, **example.get("chat_template_kwargs", {})}
                     if "prompt" in example:  # explicit prompt case
                         example["chosen"] = example["prompt"] + example["chosen"]
                         example["rejected"] = example["prompt"] + example["rejected"]
 
                     if is_conversational(example):
-                        chosen_input_ids = processing_class.apply_chat_template(
+                        chosen_ids = _tokenize(
+                            processing_class,
                             example["chosen"],
-                            tools=example.get("tools"),
-                            **example.get("chat_template_kwargs", {}),
-                        )
-                        rejected_input_ids = processing_class.apply_chat_template(
+                            **apply_chat_template_kwargs,
+                        )["input_ids"]
+                        rejected_ids = _tokenize(
+                            processing_class,
                             example["rejected"],
-                            tools=example.get("tools"),
-                            **example.get("chat_template_kwargs", {}),
-                        )
-                        output = {"chosen_input_ids": chosen_input_ids, "rejected_input_ids": rejected_input_ids}
+                            **apply_chat_template_kwargs,
+                        )["input_ids"]
+                        output = {"chosen_ids": chosen_ids, "rejected_ids": rejected_ids}
                     else:
                         output = {
-                            "chosen_input_ids": processing_class(text=example["chosen"])["input_ids"],
-                            "rejected_input_ids": processing_class(text=example["rejected"])["input_ids"],
+                            "chosen_ids": _tokenize(processing_class, example["chosen"])["input_ids"],
+                            "rejected_ids": _tokenize(processing_class, example["rejected"])["input_ids"],
                         }
                     return output
 
@@ -1121,8 +1345,10 @@ class _UnslothRewardTrainer(BaseTrainer):
                 if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
                     map_kwargs["desc"] = f"Filtering {dataset_name} >{args.max_length} tokens"
                 dataset = dataset.filter(
-                    lambda example: len(example["chosen_input_ids"]) <= args.max_length
-                    and len(example["rejected_input_ids"]) <= args.max_length,
+                    lambda example: (
+                        len(example["chosen_ids"]) <= args.max_length
+                        and len(example["rejected_ids"]) <= args.max_length
+                    ),
                     **map_kwargs,
                 )
 
@@ -1133,18 +1359,36 @@ class _UnslothRewardTrainer(BaseTrainer):
         # By default, this method sets `self._signature_columns` to the model's expected inputs (usually, "input_ids"
         # and "attention_mask").
         if self._signature_columns is None:
-            self._signature_columns = ["chosen_input_ids", "rejected_input_ids", "margin"]
+            self._signature_columns = ["chosen_ids", "rejected_ids", "margin"]
 
-    def compute_loss(
+    def evaluate(
         self,
-        model: nn.Module,
-        inputs: dict[str, Union[torch.Tensor, Any]],
-        return_outputs: bool = False,
-        num_items_in_batch: Optional[torch.Tensor] = None,
-    ):
-        """
-        Compute training loss and additionally compute token accuracies
-        """
+        eval_dataset: Dataset
+        | IterableDataset
+        | DatasetDict
+        | IterableDatasetDict
+        | dict[str, Dataset | IterableDataset]
+        | None = None,
+        ignore_keys: list[str] | None = None,
+        metric_key_prefix: str = "eval",
+    ) -> dict[str, float]:
+        # When a dataset is passed directly to `evaluate` (e.g. a held-out test set), preprocess it the same way
+        # `__init__` does, so that `evaluate` accepts the same dataset types as the trainer. `_prepare_dataset` is
+        # idempotent: it skips datasets that are already tokenized. A `str` selects a dataset that was already prepared
+        # at init time, so it's left untouched.
+        if eval_dataset is not None and not isinstance(eval_dataset, str):
+            if isinstance(eval_dataset, dict):
+                eval_dataset = {
+                    key: self._prepare_dataset(dataset, self.processing_class, self.args, key)
+                    for key, dataset in eval_dataset.items()
+                }
+            else:
+                eval_dataset = self._prepare_dataset(eval_dataset, self.processing_class, self.args, "eval")
+        return super().evaluate(
+            eval_dataset=eval_dataset, ignore_keys=ignore_keys, metric_key_prefix=metric_key_prefix
+        )
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         mode = "train" if self.model.training else "eval"
 
         # If not set, defaults from model config and may warn since cache isn't compatible with gradient checkpointing
@@ -1165,7 +1409,7 @@ class _UnslothRewardTrainer(BaseTrainer):
 
         if mode == "train":
             num_tokens_in_batch = self.accelerator.gather_for_metrics(inputs["attention_mask"].sum()).sum().item()
-            self._total_train_tokens += num_tokens_in_batch
+            self._total_train_tokens += num_tokens_in_batch // self._tp_size
         self._metrics[mode]["num_tokens"] = [self._total_train_tokens]
 
         # Compute min, mean, max, accuracy and margin
@@ -1190,7 +1434,7 @@ class _UnslothRewardTrainer(BaseTrainer):
         with self.maybe_activation_offload_context:
             return super().training_step(*args, **kwargs)
 
-    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         mode = "train" if self.model.training else "eval"
         metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}  # average the metrics
 
@@ -1221,25 +1465,31 @@ This class is a wrapper around the [`~transformers.Trainer`] class and inherits 
 Example:
 
 ```python
-from trl import RewardTrainer
-from datasets import load_dataset
+>>> from trl import RewardTrainer
+>>> from datasets import load_dataset
 
-dataset = load_dataset("trl-lib/ultrafeedback_binarized", split="train")
+>>> dataset = load_dataset("trl-lib/ultrafeedback_binarized", split="train")
 
-trainer = RewardTrainer(model="Qwen/Qwen2.5-0.5B-Instruct", train_dataset=dataset)
-trainer.train()
+>>> trainer = RewardTrainer(
+...     model="Qwen/Qwen2.5-0.5B-Instruct",
+...     train_dataset=dataset,
+... )
+>>> trainer.train()
 ```
 
 Args:
-    model (`Union[str, PreTrainedModel]`):
+    model (`str` or [`~transformers.PreTrainedModel`] or [`~peft.PeftModel`]):
         Model to be trained. Can be either:
 
         - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or a
           path to a *directory* containing model weights saved using
           [`~transformers.PreTrainedModel.save_pretrained`], e.g., `'./my_model_directory/'`. The model is loaded
           using `AutoModelForSequenceClassification.from_pretrained` with the keyword arguments in
-          `args.model_init_kwargs`.
+          `args.model_init_kwargs`. If `dtype` is not specified in `args.model_init_kwargs`, it defaults to
+          `float32`. This differs from [`~transformers.PreTrainedModel.from_pretrained`], where (since Transformers
+          v5) the dtype is inferred from the model config.
         - A sequence classification [`~transformers.PreTrainedModel`] object.
+        - A sequence classification [`~peft.PeftModel`] object.
     args ([`RewardConfig`], *optional*):
         Configuration for this trainer. If `None`, a default configuration is used.
     data_collator ([`~transformers.DataCollator`], *optional*):
@@ -1253,9 +1503,13 @@ Args:
         - [Conversational](dataset_formats#conversational): Each sample contains structured messages (e.g., role
           and content).
 
-        The trainer also supports processed datasets (tokenized) as long as they contain an `chosen_input_ids` and
-        `rejected_input_ids` fields.
-    eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Union[Dataset, IterableDataset]]`):
+        The trainer also supports processed datasets (tokenized) as long as they contain `chosen_ids` and
+        `rejected_ids` fields.
+
+        When `train_dataset` is an [`~datasets.IterableDataset`] (e.g. a streaming dataset), `max_steps` must be
+        set in the training arguments, since its length cannot be inferred and the total number of training steps
+        is required to bound the training loop and configure the learning rate scheduler.
+    eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`], [`~datasets.DatasetDict`], [`~datasets.IterableDatasetDict`] or `dict[str, Dataset | IterableDataset]`):
         Dataset to use for evaluation. It must meet the same requirements as `train_dataset`.
     processing_class ([`~transformers.PreTrainedTokenizerBase`], *optional*):
         Tokenizer used to process the data. If `None`, the tokenizer is loaded from the model's name with
@@ -1275,7 +1529,7 @@ Args:
 
         If you want to remove one of the default callbacks used, use the [`~transformers.Trainer.remove_callback`]
         method.
-    optimizers (`tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]]`, *optional*, defaults to `(None, None)`):
+    optimizers (`tuple[torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None]`, *optional*, defaults to `(None, None)`):
         A tuple containing the optimizer and the scheduler to use. Will default to an instance of `AdamW` on your
         model and a scheduler given by [`~transformers.get_linear_schedule_with_warmup`] controlled by `args`.
     optimizer_cls_and_kwargs (`tuple[Type[torch.optim.Optimizer], Dict[str, Any]]`, *optional*):
@@ -1290,6 +1544,10 @@ Args:
         by this function will be reflected in the predictions received by `compute_metrics`.
 
         Note that the labels (second parameter) will be `None` if the dataset does not have them.
+    quantization_config ([`~transformers.BitsAndBytesConfig`], *optional*):
+        Quantization configuration used when loading the model from a model identifier. Combine with `peft_config`
+        for QLoRA training. Ignored if the model is already instantiated, or if `quantization_config` is also set
+        in `args.model_init_kwargs`.
     peft_config ([`~peft.PeftConfig`], *optional*):
         PEFT configuration used to wrap the model. If `None`, the model is not wrapped. Note that if the loaded
         model is a causal LM, it's highly recommended to set `modules_to_save=["score"]` in the PEFT configuration
@@ -1308,6 +1566,7 @@ Args:
         callbacks = None,
         optimizer_cls_and_kwargs = None,
         preprocess_logits_for_metrics = None,
+        quantization_config = None,
         peft_config = None,
         **kwargs
     ):
@@ -1388,7 +1647,8 @@ Args:
                       '`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`')
         if getattr(args, 'eval_strategy', 'no') != 'no':
             eval_bsz = getattr(args, 'per_device_eval_batch_size', 8)
-            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz: args.per_device_eval_batch_size = args.per_device_train_batch_size
+            eval_generations = getattr(args, 'num_generations_eval', None) or getattr(args, 'num_generations', None) or 1
+            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz and (args.per_device_train_batch_size * args.world_size) % eval_generations == 0: args.per_device_eval_batch_size = args.per_device_train_batch_size
             if getattr(args, 'eval_accumulation_steps', None) is None and ga_steps is not None: args.eval_accumulation_steps = ga_steps
         fp16_full_eval = getattr(args, 'fp16_full_eval', False)
         if type(fp16_full_eval) is not bool: fp16_full_eval = False
@@ -1405,11 +1665,6 @@ Args:
         elif not bf16_full_eval and not fp16_full_eval:
             args.bf16_full_eval = args.bf16
             args.fp16_full_eval = args.fp16
-        _output_logits = False
-        if locals().get('compute_metrics', None) is not None: _output_logits = True
-        if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
-        if _output_logits:
-            os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
         if model is not None:
             _warnings_issued = getattr(model, 'warnings_issued', None)
             if _warnings_issued is None:
@@ -1442,14 +1697,14 @@ Args:
         __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
         from unsloth_zoo.vision_utils import UnslothVisionDataCollator
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
+            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in _unsloth_dataset_column_names(train_dataset):
                 data_collator = TransformersDataCollatorForLanguageModeling(
                     __tokenizer,
                     mlm = False,
                     mlm_probability = 0.0,
                     pad_to_multiple_of = getattr(args, 'pad_to_multiple_of', None),
                 )
-            elif isinstance(data_collator, TransformersDataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+            elif isinstance(data_collator, TransformersDataCollatorForLanguageModeling) and 'labels' in _unsloth_dataset_column_names(train_dataset):
                 data_collator = DataCollatorForSeq2Seq(
                     __tokenizer,
                     pad_to_multiple_of = getattr(args, 'pad_to_multiple_of', None),
@@ -1496,6 +1751,7 @@ Args:
             callbacks = callbacks,
             optimizer_cls_and_kwargs = optimizer_cls_and_kwargs,
             preprocess_logits_for_metrics = preprocess_logits_for_metrics,
+            quantization_config = quantization_config,
             peft_config = peft_config,**kwargs)
         if "model" in locals() and hasattr(model, "for_inference"):
             model.for_inference()
@@ -1521,6 +1777,14 @@ Args:
             _pc = getattr(self, 'processing_class', None) or getattr(self, 'tokenizer', None)
             if _vllm_tok is not None and _pc is not None and getattr(_pc, 'chat_template', None) is not None and getattr(_vllm_tok, 'chat_template', None) is None:
                 _vllm_tok.chat_template = _pc.chat_template
+        pass
+        if getattr(self, 'aux_loss_enabled', False) and hasattr(getattr(self, 'model', None), 'config'):
+            _text_config = self.model.config
+            if hasattr(_text_config, 'get_text_config'): _text_config = _text_config.get_text_config()
+            _n_experts = [getattr(_text_config, _k) for _k in ('num_local_experts', 'num_experts', 'n_routed_experts', 'moe_num_experts') if isinstance(getattr(_text_config, _k, None), int)]
+            if _n_experts and all(_n == 0 for _n in _n_experts):
+                self.aux_loss_enabled = False
+                _text_config.output_router_logits = False
         pass
         
 pass

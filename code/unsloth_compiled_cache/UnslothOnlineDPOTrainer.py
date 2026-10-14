@@ -1,8 +1,8 @@
 """
-2026.8.16
-2026.8.22
-5.5.0
-0.24.0
+2026.10.5
+2026.10.5
+5.17.0
+1.15.0
 __UNSLOTH_VERSIONING__
 """
 
@@ -29,8 +29,9 @@ from torch.nn import functional as F
 from unsloth_zoo.temporary_patches.common import torch_compile
 from unsloth_zoo.temporary_patches.common import _maybe_compile
 import functools
+import transformers
 from typing import Any, List, Optional, Tuple, Union, Dict, Set, Callable
-from trl.trainer.online_dpo_trainer import (Any, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, BasePairwiseJudge, BaseTrainer, Callable, DPODataCollatorWithPadding, DataCollator, DataLoader, Dataset, EvalPrediction, F, FSDP, GenerationConfig, IterableDataset, MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES, OnlineDPOConfig, OnlineDPOTrainer, OptimizerNames, Optional, Path, PeftConfig, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, RewardFunc, SIMPLE_CHAT_TEMPLATE, Trainer, TrainerCallback, Union, apply_chat_template, broadcast_object_list, create_reference_model, disable_dropout_in_model, empty_cache, gather_object, is_conversational, is_flash_attn_2_available, is_peft_model, jinja2, logger, logging, maybe_apply_chat_template, nn, nullcontext, os, pad, prepare_deepspeed, prepare_fsdp, profiling_context, re, seed_worker, textwrap, torch, truncate_right, unwrap_model_for_generation, version, warnings, wraps, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, BasePairwiseJudge, Callable, DPODataCollatorWithPadding, DataCollator, Dataset, EvalPrediction, F, GenerationConfig, IterableDataset, MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES, OnlineDPOConfig, Optional, PeftConfig, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, RewardFunc, Trainer, TrainerCallback, Union, create_reference_model, disable_dropout_in_model, logger, nn, os, pad, prepare_deepspeed, prepare_fsdp, re, torch, version, warnings, F, apply_chat_template, is_conversational, re, F, FSDP, is_peft_model, nn, nullcontext, os, re, version, F, PreTrainedModel, Trainer, logger, os, re, torch, F, FSDP, nn, os, re, F, FSDP, nn, re, torch)
+from trl.experimental.online_dpo.online_dpo_trainer import (Any, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, Callable, DPODataCollatorWithPadding, DataCollator, Dataset, EvalPrediction, F, FSDP, GenerationConfig, IterableDataset, MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES, OnlineDPOConfig, OnlineDPOTrainer, OptimizerNames, Path, PeftConfig, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, RewardFunc, TrainerCallback, Version, _BaseTrainer, apply_chat_template, broadcast_object_list, create_reference_model, disable_dropout_in_model, empty_cache, gather_object, get_callable_name, get_config_model_id, is_conversational, is_peft_available, is_peft_model, maybe_apply_chat_template, nested_gather, nn, nullcontext, os, prepare_deepspeed, prepare_fsdp, prepare_multimodal_messages, profiling_context, re, set_seed, textwrap, torch, transformers, truncate_right, unwrap_model_for_generation, AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, Callable, DPODataCollatorWithPadding, DataCollator, Dataset, EvalPrediction, F, FSDP, GenerationConfig, IterableDataset, MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES, OnlineDPOConfig, PeftConfig, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, RewardFunc, TrainerCallback, Version, create_reference_model, disable_dropout_in_model, get_callable_name, get_config_model_id, is_peft_available, is_peft_model, nn, os, prepare_deepspeed, prepare_fsdp, re, set_seed, torch, transformers, re, torch, F, apply_chat_template, empty_cache, is_conversational, re, F, FSDP, is_peft_model, nn, nullcontext, os, re, F, PreTrainedModel, is_peft_available, os, re, torch, F, FSDP, nn, os, re, F, FSDP, is_peft_model, nn, re)
 
 
 import os
@@ -46,7 +47,7 @@ from torch.nn import functional as F
 import inspect
 from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling as TransformersDataCollatorForLanguageModeling
 from transformers.training_args import ParallelMode
-from unsloth_zoo.device_type import DEVICE_TYPE, device_synchronize
+from unsloth_zoo.device_type import DEVICE_TYPE, DEVICE_TYPE_TORCH, device_synchronize
 
 # Wrap trainer with padding to right and enable training mode
 import functools
@@ -61,13 +62,23 @@ try:
     from unsloth.models._utils import _unsloth_reset_stray_compile_cache
 except Exception:
     def _unsloth_reset_stray_compile_cache(self): pass
+try:
+    from unsloth.models._utils import _unsloth_dataset_column_names
+except Exception:
+    def _unsloth_dataset_column_names(dataset): return dataset.column_names
 # Drops/renames config arguments the installed TRL no longer accepts, so a
 # script pinned to an older TRL keeps working after an upgrade. Falls back to
 # the historical raw passthrough so this can never break trainer construction.
 try:
     from unsloth.models.rl_config_compat import filter_config_init_kwargs as _unsloth_filter_config_init_kwargs
+    # A cache file generated here can be imported by an older Unsloth whose filter
+    # predates `mirrored_from`, so drop the argument rather than raise TypeError.
+    if "mirrored_from" not in inspect.signature(_unsloth_filter_config_init_kwargs).parameters:
+        _unsloth_filter_config_init_kwargs_old = _unsloth_filter_config_init_kwargs
+        def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw):
+            return _unsloth_filter_config_init_kwargs_old(config_class, kwargs)
 except Exception:
-    def _unsloth_filter_config_init_kwargs(config_class, kwargs): return kwargs
+    def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw): return kwargs
 def prepare_for_training_mode(f):
     @functools.wraps(f)
     def wrapper(self, *args, **kwargs):
@@ -161,6 +172,7 @@ def chunked_hidden_states_selective_log_softmax(
         if os.environ.get("UNSLOTH_GRPO_MAX_ROWS_PER_CHUNK", "0").strip().isdigit()
         else 0
     ),
+    lm_head_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # All Unsloth Zoo code licensed under AGPL3
     # Reshape on this tensor's own last dim: a no-op, so a wrong-width caller
@@ -185,8 +197,20 @@ def chunked_hidden_states_selective_log_softmax(
         chunks = max(chunks, -(-n_rows // max_rows_per_chunk))
         chunks = min(chunks, max(n_rows, 1))
 
-    chunked_hidden_states = torch.chunk(flat_hidden_states, chunks=chunks, dim=0)
-    chunked_index = torch.chunk(flat_index, chunks=chunks, dim=0)
+    # A one-row chunk's head gradient is a K=1 matmul Inductor mis-lowers under dynamic shapes (illegal
+    # memory access or NaN head gradients, torch 2.13), so keep chunks at 2+ rows when the head trains.
+    # Exactly `chunks` row ranges, so the unrolled loop length never depends on T: torch.chunk
+    # returns ceil(T / ceil(T / chunks)) pieces and recompiled per new count; tensor_split guards
+    # on T % chunks. At most rows // 2 chunks when the head trains keeps every piece at 2+ rows.
+    lm_head_grad = torch.is_grad_enabled() and lm_head.requires_grad
+    if lm_head_grad and flat_hidden_states.shape[0] < 2 * chunks:
+        chunks = max(flat_hidden_states.shape[0] // 2, 1)
+
+    n_rows = flat_hidden_states.shape[0]
+    chunks = max(1, min(chunks, n_rows))
+    bounds = [(i * n_rows) // chunks for i in range(chunks + 1)]
+    chunked_hidden_states = [flat_hidden_states[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    chunked_index = [flat_index[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
 
     all_per_token_logps = []
 
@@ -201,7 +225,10 @@ def chunked_hidden_states_selective_log_softmax(
         # bit-identical to before.
         chunk_hidden_states = chunk_hidden_states.to(device = lm_head.device, dtype = lm_head.dtype)
         chunk_index = chunk_index.to(lm_head.device)
-        chunk_logits = chunk_hidden_states @ lm_head.t()
+        if lm_head_bias is None:
+            chunk_logits = chunk_hidden_states @ lm_head.t()
+        else:
+            chunk_logits = torch.nn.functional.linear(chunk_hidden_states, lm_head, lm_head_bias)
 
         if logit_scale_multiply != 0.0:
             chunk_logits = chunk_logits * logit_scale_multiply
@@ -234,8 +261,14 @@ def chunked_selective_log_softmax(
     temperature: float = 1.0,
     chunks: int = 4,
 ):
-    chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = chunks, dim = 0)
-    chunked_index  = torch.chunk(index.reshape(-1), chunks = chunks, dim = 0)
+    # Fixed `chunks` row ranges; see chunked_hidden_states_selective_log_softmax.
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_index = index.reshape(-1)
+    # Fewer rows than chunks: one row per range, as torch.chunk did, never empty ranges.
+    chunks = max(1, min(chunks, flat_logits.shape[0]))
+    bounds = [(i * flat_logits.shape[0]) // chunks for i in range(chunks + 1)]
+    chunked_logits = [flat_logits[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    chunked_index  = [flat_index[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
     all_per_token_logps = []
     # Per-chunk selective_log_softmax.
     for chunk_logits, chunk_index in zip(chunked_logits, chunked_index):
@@ -399,7 +432,8 @@ def autotune_batch_and_chunks(
 
     if valid_indices.shape[0] == 0:
         #This means your GPU will OOM
-        return 4, final_m
+        # Capped at the row count: unsloth's no-grad pass divides rows by this without max(1, ...).
+        return max(1, min(4, total_input_rows)), final_m
 
     best_idx = valid_indices[0].item()
     final_b = int(b_vals[best_idx].item())
@@ -426,7 +460,7 @@ def vLLMSamplingParams(**kwargs):
 class UnslothOnlineDPOConfig(OnlineDPOConfig):
     """
     
-Configuration class for the [`OnlineDPOTrainer`].
+Configuration class for the [`experimental.online_dpo.OnlineDPOTrainer`].
 
 This class includes only the parameters that are specific to Online DPO training. For a full list of training
 arguments, please refer to the [`~transformers.TrainingArguments`] documentation. Note that default values in this
@@ -438,12 +472,10 @@ command line.
 
 Parameters:
     reward_model_path (`str`, *optional*):
-        Path to the reward model. Either `judge` or `reward_model_path` must be set, but not both.
-    judge (`str`, *optional*):
-        Name of the judge to use. Either `judge` or `reward_model_path` must be set, but not both.
+        Path to the reward model.
     max_new_tokens (`int`, *optional*, defaults to `64`):
         Maximum number of tokens to generate per completion.
-    max_length (`int`, *optional*, defaults to `256`):
+    max_length (`int`, *optional*, defaults to `512`):
         Maximum total length of the sequence (prompt + completion) used to compute log probabilities. If the
         sequence exceeds this limit, the leftmost tokens will be truncated to preserve as much of the completion as
         possible.
@@ -452,7 +484,7 @@ Parameters:
     missing_eos_penalty (`float`, *optional*):
         Penalty applied to the score when the model fails to generate an EOS token. This is useful to encourage to
         generate completions shorter than the maximum length (`max_new_tokens`). The penalty must be a positive
-        value. This parameter only works when using `reward_funcs` and not when using `judge`.
+        value.
     beta (`float` or `list[float]`, *optional*, defaults to `0.1`):
         Parameter controlling the deviation from the reference model. Higher β means less deviation from the
         reference model. For the IPO loss (`loss_type="ipo"`), β is the regularization parameter denoted by τ in
@@ -463,17 +495,6 @@ Parameters:
 
             - `"sigmoid"`: sigmoid loss from the original [DPO](https://huggingface.co/papers/2305.18290) paper.
             - `"ipo"`: IPO loss from the [IPO](https://huggingface.co/papers/2310.12036) paper.
-
-    dataset_num_proc (`int`, *optional*):
-        Number of processes to use for processing the dataset.
-
-        <Deprecated version="0.22.0">
-
-        This parameter is deprecated and will be removed in version 0.25.0. Since OnlineDPO does not involve
-        dataset preparation, you can safely remove it.
-
-        </Deprecated>
-
     disable_dropout (`bool`, *optional*, defaults to `True`):
         Whether to disable dropout in the model and reference model.
 
@@ -482,8 +503,8 @@ Parameters:
     top_p (`float`, *optional*, defaults to `1.0`):
         Float that controls the cumulative probability of the top tokens to consider. Must be in (0, 1]. Set to
         `1.0` to consider all tokens.
-    top_k (`int`, *optional*):
-        Number of highest probability vocabulary tokens to keep for top-k-filtering. If `None`, top-k-filtering is
+    top_k (`int`, *optional*, defaults to `0`):
+        Number of highest probability vocabulary tokens to keep for top-k-filtering. If `0`, top-k-filtering is
         disabled and all tokens are considered.
     min_p (`float`, *optional*):
         Minimum token probability, which will be scaled by the probability of the most likely token. It must be a
@@ -492,10 +513,6 @@ Parameters:
         Float that penalizes new tokens based on whether they appear in the prompt and the generated text so far.
         Values > `1.0` encourage the model to use new tokens, while values < `1.0` encourage the model to repeat
         tokens.
-    use_transformers_paged (`bool`, *optional*, defaults to `False`):
-        Whether to use the `transformers` paged implementation for generation. If set to `True`, the `transformers`
-        paged implementation will be used for generation instead of the default padded implementation. This
-        parameter is only effective when `use_vllm` is set to `False`.
     cache_implementation (`str`, *optional*):
         Implementation of the cache method for faster generation when `use_vllm` is set to `False`.
     generation_kwargs (`dict[str, Any]`, *optional*):
@@ -513,16 +530,16 @@ Parameters:
         Model implementation to use for vLLM. Must be one of `"transformers"` or `"vllm"`. `"transformers"`: Use
         the `transformers` backend for model implementation. `"vllm"`: Use the `vllm` library for model
         implementation.
-    vllm_mode (`str`, *optional*, defaults to `"server"`):
+    vllm_mode (`str`, *optional*, defaults to `"colocate"`):
         Mode to use for vLLM integration when `use_vllm` is set to `True`. Must be one of `"server"` or
         `"colocate"`.
 
-        - `"server"`: The trainer will send generation requests to a separate vLLM server. Make sure a TRL vLLM
-          server is running (start with `trl vllm-serve`).
+        - `"server"`: The trainer will send generation requests to a separate vLLM server. Make sure a vLLM server
+          is running (start with `vllm serve`).
         - `"colocate"`: vLLM will run in the same process and share the training GPUs. This avoids the need for a
           separate server but may cause resource contention with training.
-    vllm_guided_decoding_regex (`str`, *optional*):
-        Regex for vLLM guided decoding. If `None` (default), guided decoding is disabled.
+    vllm_structured_outputs_regex (`str`, *optional*):
+        Regex for vLLM structured outputs. If `None` (default), structured outputs is disabled.
 
     > Parameters that control the vLLM server (only used when `vllm_mode` is `"server"`)
 
@@ -536,6 +553,9 @@ Parameters:
     vllm_server_timeout (`float`, *optional*, defaults to `240.0`):
         Total timeout duration in seconds to wait for the vLLM server to be up. If the server is not up after the
         timeout, a `ConnectionError` is raised.
+    vllm_group_port (`int`, *optional*, defaults to `51216`):
+        Port number for the weight update group. This is used to communicate with the vLLM server. Unless the port
+        is occupied, there is no need to change it.
 
     > Parameters that control colocated vLLM execution (only used when `vllm_mode` is `"colocate"`)
 
@@ -547,6 +567,9 @@ Parameters:
         Control the tensor parallel size for vLLM. This setting only applies when `vllm_mode` is set to
         `"colocate"`. If you are using `vllm_mode="server"`, this parameter must be passed separately when
         launching the vLLM server via the `--vllm_tensor_parallel_size` flag.
+    vllm_enable_sleep_mode (`bool`, *optional*, defaults to `False`):
+        Enable vLLM sleep mode to offload weights/cache during the optimizer step. Keeps GPU memory usage low, but
+        waking the engine adds host–device transfer latency.
 
     > Other parameters
 
@@ -557,7 +580,22 @@ Parameters:
         with vLLM generation.
     model_init_kwargs (`dict[str, Any]`, *optional*):
         Keyword arguments to pass to `AutoModelForCausalLM.from_pretrained` when instantiating the model from a
-        string.
+        string. The `revision` value is also used when loading reward processing classes.
+    trust_remote_code (`bool`, *optional*, defaults to `False`):
+        Whether to allow loading models that ship custom Python code from the Hub. Forwarded to
+        [`~transformers.AutoModelForCausalLM.from_pretrained`]. Also applied to reward-model and reward-tokenizer
+        loads.
+    reward_weights (`list[float]`, *optional*):
+        Weights for combining multiple reward functions. Must match the number of reward functions. If `None`, all
+        reward functions are equally weighted.
+
+> [!NOTE]
+> These parameters have default values different from [`~transformers.TrainingArguments`]:
+> - `logging_steps`: Defaults to `10` instead of `500`.
+> - `gradient_checkpointing`: Defaults to `True` instead of `False`.
+> - `bf16`: Defaults to `True` if `fp16` is not set, instead of `False`.
+> - `learning_rate`: Defaults to `5e-7` instead of `5e-5`.
+> - `remove_unused_columns`: Defaults to `False` instead of `True`.
 
     """
     vllm_sampling_params: Optional[Any] = field(
@@ -629,7 +667,9 @@ Parameters:
         report_to = 'none',
         run_name = None,
         project = 'huggingface',
-        trackio_space_id = 'trackio',
+        trackio_space_id = None,
+        trackio_bucket_id = None,
+        trackio_static_space_id = None,
         eval_strategy = 'no',
         eval_steps = None,
         eval_delay = 0,
@@ -660,7 +700,7 @@ Parameters:
         restore_callback_states_from_checkpoint = False,
         full_determinism = False,
         seed = 3407,
-        data_seed = 3407,
+        data_seed = None,
         use_cpu = False,
         accelerator_config = None,
         parallelism_config = None,
@@ -669,13 +709,16 @@ Parameters:
         dataloader_pin_memory = True,
         dataloader_persistent_workers = False,
         dataloader_prefetch_factor = None,
-        remove_unused_columns = True,
+        dataloader_multiprocessing_context = None,
+        dataloader_in_order = True,
+        remove_unused_columns = False,
         label_names = None,
         train_sampling_strategy = 'random',
         length_column_name = 'length',
         ddp_find_unused_parameters = None,
         ddp_bucket_cap_mb = None,
         ddp_broadcast_buffers = None,
+        ddp_static_graph = None,
         ddp_backend = None,
         ddp_timeout = 1800,
         fsdp = None,
@@ -687,39 +730,36 @@ Parameters:
         do_eval = False,
         do_predict = False,
         resume_from_checkpoint = None,
-        warmup_ratio = None,
-        logging_dir = None,
         local_rank = -1,
         reward_model_path = None,
-        judge = None,
         max_new_tokens = 64,
         max_length = 512,
         temperature = 0.9,
         top_p = 1.0,
-        top_k = None,
+        top_k = 0,
         min_p = None,
         repetition_penalty = 1.0,
         generation_kwargs = {},
-        use_transformers_paged = False,
         cache_implementation = None,
         missing_eos_penalty = None,
         loss_type = 'sigmoid',
         disable_dropout = True,
         use_vllm = False,
         vllm_model_impl = 'vllm',
-        vllm_guided_decoding_regex = None,
+        vllm_structured_outputs_regex = None,
         vllm_gpu_memory_utilization = 0.55,
         vllm_mode = 'colocate',
         vllm_server_base_url = None,
         vllm_server_host = '0.0.0.0',
         vllm_server_port = 8000,
         vllm_server_timeout = 240.0,
+        vllm_group_port = 51216,
         vllm_tensor_parallel_size = 1,
+        vllm_enable_sleep_mode = False,
         ds3_gather_for_generation = True,
         model_init_kwargs = None,
+        trust_remote_code = False,
         reward_weights = None,
-        dataset_num_proc = None,
-        gpu_memory_utilization = None,
         vllm_sampling_params = None,
         unsloth_num_chunks = -1,
         unsloth_logit_chunk_multiplier = None,
@@ -729,20 +769,30 @@ Parameters:
     ):
         if learning_rate < 1e-7: print(f'Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!')
         if learning_rate > 1: print(f'Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!')
+        _unsloth_fsdp2 = os.environ.get('FSDP_VERSION', '').strip() == '2'
+        _unsloth_fsdp_cfg = fsdp_config
+        if fsdp and isinstance(_unsloth_fsdp_cfg, str) and os.path.isfile(_unsloth_fsdp_cfg):
+            try:
+                import json as _unsloth_json
+                with open(_unsloth_fsdp_cfg, encoding = 'utf-8') as _unsloth_f:
+                    _unsloth_fsdp_cfg = _unsloth_json.load(_unsloth_f)
+            except Exception:
+                _unsloth_fsdp_cfg = None
+        if fsdp and _unsloth_fsdp_cfg is None:
+            _unsloth_fsdp_cfg = {}
+        if fsdp and isinstance(_unsloth_fsdp_cfg, dict):
+            _unsloth_fsdp2 = _unsloth_fsdp2 or str(_unsloth_fsdp_cfg.get('fsdp_version', _unsloth_fsdp_cfg.get('version', 2))) == '2'
+        if _unsloth_fsdp2 and str(getattr(optim, 'value', optim)) == 'adamw_8bit':
+            print("Unsloth: FSDP2 shards parameters as DTensors, which bitsandbytes' 8-bit optimizers cannot step. Switching optim = 'adamw_8bit' to 'adamw_torch_fused'.")
+            optim = 'adamw_torch_fused'
         if num_train_epochs is None:
             num_train_epochs = 3.0  # Default to 3 epochs if None, max_steps will override
         if output_dir is None and save_strategy == 'steps' and save_steps == 500:
             output_dir = 'unsloth_training_checkpoints'
             save_strategy = 'no'
-        try:
-            from unsloth_zoo.dataset_num_proc import get_dataset_num_proc as _unsloth_get_dataset_num_proc
-        except Exception:
-            try:
-                from unsloth.dataset_num_proc import get_dataset_num_proc as _unsloth_get_dataset_num_proc
-            except Exception:
-                _unsloth_get_dataset_num_proc = None
-        if _unsloth_get_dataset_num_proc is not None:
-            dataset_num_proc = _unsloth_get_dataset_num_proc(dataset_num_proc, serial_as_none = True)
+        if eval_steps is not None and eval_strategy != 'steps':
+            print(f'Unsloth: `eval_steps = {eval_steps}` is ignored because `eval_strategy` is {getattr(eval_strategy, "value", eval_strategy)!r}. Set `eval_strategy = "steps"` to evaluate every `eval_steps` steps.')
+        
         if temperature <= 0:
             raise ValueError('Unsloth: Please set a positive non-zero temperature since your results will be wrong.')
         elif temperature >= 10:
@@ -801,6 +851,8 @@ Parameters:
             run_name = run_name,
             project = project,
             trackio_space_id = trackio_space_id,
+            trackio_bucket_id = trackio_bucket_id,
+            trackio_static_space_id = trackio_static_space_id,
             eval_strategy = eval_strategy,
             eval_steps = eval_steps,
             eval_delay = eval_delay,
@@ -840,6 +892,8 @@ Parameters:
             dataloader_pin_memory = dataloader_pin_memory,
             dataloader_persistent_workers = dataloader_persistent_workers,
             dataloader_prefetch_factor = dataloader_prefetch_factor,
+            dataloader_multiprocessing_context = dataloader_multiprocessing_context,
+            dataloader_in_order = dataloader_in_order,
             remove_unused_columns = remove_unused_columns,
             label_names = label_names,
             train_sampling_strategy = train_sampling_strategy,
@@ -847,6 +901,7 @@ Parameters:
             ddp_find_unused_parameters = ddp_find_unused_parameters,
             ddp_bucket_cap_mb = ddp_bucket_cap_mb,
             ddp_broadcast_buffers = ddp_broadcast_buffers,
+            ddp_static_graph = ddp_static_graph,
             ddp_backend = ddp_backend,
             ddp_timeout = ddp_timeout,
             fsdp = fsdp,
@@ -858,11 +913,8 @@ Parameters:
             do_eval = do_eval,
             do_predict = do_predict,
             resume_from_checkpoint = resume_from_checkpoint,
-            warmup_ratio = warmup_ratio,
-            logging_dir = logging_dir,
             local_rank = local_rank,
             reward_model_path = reward_model_path,
-            judge = judge,
             max_new_tokens = max_new_tokens,
             max_length = max_length,
             temperature = temperature,
@@ -871,27 +923,27 @@ Parameters:
             min_p = min_p,
             repetition_penalty = repetition_penalty,
             generation_kwargs = generation_kwargs,
-            use_transformers_paged = use_transformers_paged,
             cache_implementation = cache_implementation,
             missing_eos_penalty = missing_eos_penalty,
             loss_type = loss_type,
             disable_dropout = disable_dropout,
             use_vllm = use_vllm,
             vllm_model_impl = vllm_model_impl,
-            vllm_guided_decoding_regex = vllm_guided_decoding_regex,
+            vllm_structured_outputs_regex = vllm_structured_outputs_regex,
             vllm_gpu_memory_utilization = vllm_gpu_memory_utilization,
             vllm_mode = vllm_mode,
             vllm_server_base_url = vllm_server_base_url,
             vllm_server_host = vllm_server_host,
             vllm_server_port = vllm_server_port,
             vllm_server_timeout = vllm_server_timeout,
+            vllm_group_port = vllm_group_port,
             vllm_tensor_parallel_size = vllm_tensor_parallel_size,
+            vllm_enable_sleep_mode = vllm_enable_sleep_mode,
             ds3_gather_for_generation = ds3_gather_for_generation,
             model_init_kwargs = model_init_kwargs,
-            reward_weights = reward_weights,
-            dataset_num_proc = dataset_num_proc,
-            gpu_memory_utilization = gpu_memory_utilization,**kwargs)
-        super().__init__(**_unsloth_filter_config_init_kwargs(OnlineDPOConfig, _unsloth_config_arguments))
+            trust_remote_code = trust_remote_code,
+            reward_weights = reward_weights,**kwargs)
+        super().__init__(**_unsloth_filter_config_init_kwargs(OnlineDPOConfig, _unsloth_config_arguments, mirrored_from = __class__))
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
         if unsloth_grpo_mini_batch is not None:
@@ -904,15 +956,21 @@ Parameters:
                 )
         self.unsloth_logit_chunk_multiplier = unsloth_logit_chunk_multiplier
         self.max_seq_length = max_seq_length
+        # Unsloth: keep the reentrant checkpoint path
+        if getattr(self, 'gradient_checkpointing', False):
+            _gc_kwargs = getattr(self, 'gradient_checkpointing_kwargs', None) or {}
+            if _gc_kwargs.get('context_fn') is None and not _gc_kwargs.get('debug', False):
+                _gc_kwargs['use_reentrant'] = True
+                self.gradient_checkpointing_kwargs = _gc_kwargs
 
 pass
 
-class _UnslothOnlineDPOTrainer(BaseTrainer):
+class _UnslothOnlineDPOTrainer(_BaseTrainer):
     r"""
     Initialize OnlineDPOTrainer.
 
     Args:
-        model (`Union[str, nn.Module, PreTrainedModel]`):
+        model (`str | nn.Module | PreTrainedModel`):
             Model to be trained. Can be either:
 
             - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or a
@@ -924,26 +982,22 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         ref_model ([`~transformers.PreTrainedModel`] or `torch.nn.Module` or `None`):
             The reference model to use for training. If None is specified, the reference model will be created from the
             model.
-        judge ([`BasePairwiseJudge`]):
-            The judge to use for pairwise comparison of model completions.
-        reward_funcs (`Union[RewardFunc, list[RewardFunc]]`, *optional*):
+        reward_funcs (`RewardFunc | list[RewardFunc]`):
             Reward functions to be used for computing the rewards. To compute the rewards, we call all the reward
             functions with the prompts and completions and sum the rewards. Can be either:
 
             - A single reward function: Can be a string (path to model), a [`~transformers.PreTrainedModel`], or a
               custom callable function.
             - A list of reward functions: Must all be of compatible types.
-
-            Note: Only one of `judge`, or `reward_funcs` should be provided.
-        args ([`OnlineDPOConfig`]):
+        args ([`experimental.online_dpo.OnlineDPOConfig`]):
             The online DPO config arguments to use for training.
         data_collator ([`~transformers.DataCollator`]):
             The data collator to use for training. If None is specified, the default data collator
-            ([`DPODataCollatorWithPadding`]) will be used which will pad the sequences to the maximum length of the
-            sequences in the batch, given a dataset of paired sequences.
+            ([`experimental.utils.DPODataCollatorWithPadding`]) will be used which will pad the sequences to the
+            maximum length of the sequences in the batch, given a dataset of paired sequences.
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
             The dataset to use for training.
-        eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Union[Dataset, IterableDataset]]`):
+        eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Dataset | IterableDataset]`):
             The dataset to use for evaluation.
         processing_class ([`~transformers.PreTrainedTokenizerBase`] or [`~transformers.ProcessorMixin`], *optional*):
             Processing class used to process the data. If provided, will be used to automatically process the inputs
@@ -968,14 +1022,6 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
             The optimizer and scheduler to use for training.
         preprocess_logits_for_metrics (`Callable[[torch.Tensor, torch.Tensor], torch.Tensor]`):
             The function to use to preprocess the logits before computing the metrics.
-
-        reward_model:
-
-            <Deprecated version="0.22.0">
-
-            This parameter is deprecated and will be removed in version 0.25.0. Use `reward_funcs` instead.
-
-            </Deprecated>
     """
 
     _tag_names = ["trl", "online-dpo"]
@@ -995,36 +1041,33 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
 
     def __init__(
         self,
-        model: Union[PreTrainedModel, nn.Module, str],
-        ref_model: Union[PreTrainedModel, nn.Module, None] = None,
-        reward_funcs: Optional[Union[RewardFunc, list[RewardFunc]]] = None,
-        judge: Optional[BasePairwiseJudge] = None,
-        args: Optional[OnlineDPOConfig] = None,
-        data_collator: Optional[DataCollator] = None,
-        train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
-        eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,
-        processing_class: Optional[Union[PreTrainedTokenizerBase, ProcessorMixin]] = None,
-        reward_processing_classes: Optional[Union[PreTrainedTokenizerBase, list[PreTrainedTokenizerBase]]] = None,
-        peft_config: Optional["PeftConfig"] = None,
-        compute_metrics: Optional[Callable[[EvalPrediction], dict]] = None,
-        callbacks: Optional[list[TrainerCallback]] = None,
+        model: PreTrainedModel | nn.Module | str,
+        ref_model: PreTrainedModel | nn.Module | None = None,
+        reward_funcs: RewardFunc | list[RewardFunc] | None = None,
+        args: OnlineDPOConfig | None = None,
+        data_collator: DataCollator | None = None,
+        train_dataset: Dataset | IterableDataset | None = None,
+        eval_dataset: Dataset | IterableDataset | dict[str, Dataset | IterableDataset] | None = None,
+        processing_class: PreTrainedTokenizerBase | ProcessorMixin | None = None,
+        reward_processing_classes: PreTrainedTokenizerBase | list[PreTrainedTokenizerBase] | None = None,
+        peft_config: "PeftConfig | None" = None,
+        compute_metrics: Callable[[EvalPrediction], dict] | None = None,
+        callbacks: list[TrainerCallback] | None = None,
         optimizers: tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        # Deprecated parameters
-        reward_model: Optional[Union[PreTrainedModel, nn.Module]] = None,
-        reward_processing_class: Optional[PreTrainedTokenizerBase] = None,
+        preprocess_logits_for_metrics: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
     ) -> None:
 
         if hasattr(model, 'vllm_engine') and hasattr(args, 'use_vllm'):
+            _unsloth_fsdp_cfg = getattr(args, 'fsdp_config', None)
+            if getattr(args, 'fsdp', None) and isinstance(_unsloth_fsdp_cfg, dict) and str(_unsloth_fsdp_cfg.get('version', _unsloth_fsdp_cfg.get('fsdp_version', 2))) == '2':
+                raise NotImplementedError('Unsloth: `fast_inference = True` (vLLM) is not supported with FSDP2.\nLoad the model with `fast_inference = False` to train with FSDP2, or launch without FSDP2 to use vLLM.')
             if (getattr(args, 'use_vllm', False) == False):
                 args.use_vllm = True
-        if not os.environ.get("TRL_EXPERIMENTAL_SILENCE"):
-            warnings.warn(
-                "This trainer will soon be moved to trl.experimental and is a candidate for removal. If you rely on "
-                "it and want it to remain, please share your comments here: "
-                "https://github.com/huggingface/trl/issues/4223. Silence this warning by setting environment variable "
-                "TRL_EXPERIMENTAL_SILENCE=1."
-            )
+            if getattr(args, 'top_k', -1) is None or getattr(args, 'top_k', -1) == 0:
+                args.top_k = -1
+        if train_dataset is None:
+            raise ValueError("`train_dataset` is required")
+
         if ref_model is model:
             raise ValueError(
                 "`model` and `ref_model` cannot be the same object. If you want `ref_model` to be the "
@@ -1033,120 +1076,67 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
 
         self.ref_model = ref_model
 
-        # Handle deprecated parameters for backward compatibility
-        if reward_model is not None:
-            warnings.warn(
-                "The `reward_model` parameter is deprecated and will be removed in version 0.25.0. "
-                "Please use `reward_funcs` instead. For example, change `reward_model=model` to `reward_funcs=model`.",
-            )
-            # Convert old reward_model to new reward_funcs format
-            if reward_funcs is None:
-                reward_funcs = reward_model
-            else:
-                warnings.warn(
-                    "Both `reward_model` and `reward_funcs` are provided. Using `reward_funcs` and ignoring "
-                    "`reward_model`.",
-                )
-
-        if reward_processing_class is not None:
-            warnings.warn(
-                "The `reward_processing_class` parameter is deprecated and will be removed in version 0.25.0. "
-                "Please use `reward_processing_classes` instead. For example, change "
-                "`reward_processing_class=tokenizer` to `reward_processing_classes=tokenizer`.",
-            )
-            # Convert old reward_processing_class to new reward_processing_classes format
-            if reward_processing_classes is None:
-                reward_processing_classes = reward_processing_class
-            else:
-                warnings.warn(
-                    "Both `reward_processing_class` and `reward_processing_classes` are provided. Using "
-                    "`reward_processing_classes` and ignoring `reward_processing_class`.",
-                )
-
-        # Validate reward configuration - must have exactly one of: judge, or reward_funcs
-        reward_configs = sum(x is not None for x in [judge, reward_funcs])
-        if reward_configs == 0:
-            raise ValueError("One of `judge` or `reward_funcs` must be provided.")
-        elif reward_configs > 1:
-            if judge is not None:
-                logger.warning(
-                    "Both `judge` and `reward_funcs` are provided. Using `judge` and ignoring `reward_funcs`.",
-                    UserWarning,
-                )
-                reward_funcs = None
-        self.judge = judge
+        if reward_funcs is None:
+            raise ValueError("`reward_funcs` must be provided.")
 
         # Handle reward_funcs
-        if reward_funcs is not None:
-            if not isinstance(reward_funcs, list):
-                reward_funcs = [reward_funcs]
-            self.reward_func_names = []
+        if not isinstance(reward_funcs, list):
+            reward_funcs = [reward_funcs]
+        self.reward_func_names = []
 
-            # Process reward functions [convert strings to models, collect names]
-            model_init_kwargs = args.model_init_kwargs or {}
-            for i, reward_func in enumerate(reward_funcs):
-                if isinstance(reward_func, str):
-                    # Load model from string path
-                    reward_funcs[i] = AutoModelForSequenceClassification.from_pretrained(
-                        reward_func, num_labels=1, **model_init_kwargs
-                    )
-                if isinstance(reward_funcs[i], nn.Module):
-                    self.reward_func_names.append(reward_funcs[i].config._name_or_path.split("/")[-1])
-                else:
-                    self.reward_func_names.append(reward_funcs[i].__name__)
-            self.reward_funcs = reward_funcs
-
-            # Handle reward processing classes for reward_funcs
-            if reward_processing_classes is None:
-                reward_processing_classes = [None] * len(reward_funcs)
-            elif not isinstance(reward_processing_classes, list):
-                reward_processing_classes = [reward_processing_classes]
+        # Process reward functions [convert strings to models, collect names]
+        model_init_kwargs = args.model_init_kwargs or {}
+        model_init_kwargs.setdefault("trust_remote_code", args.trust_remote_code)
+        reward_model_revisions = [None] * len(reward_funcs)
+        for i, reward_func in enumerate(reward_funcs):
+            if isinstance(reward_func, str):
+                # Load model from string path
+                reward_model_revisions[i] = model_init_kwargs.get("revision")
+                reward_funcs[i] = AutoModelForSequenceClassification.from_pretrained(
+                    reward_func, num_labels=1, **model_init_kwargs
+                )
+            if isinstance(reward_funcs[i], nn.Module):
+                self.reward_func_names.append(get_config_model_id(reward_funcs[i].config).split("/")[-1])
             else:
-                if len(reward_processing_classes) != len(reward_funcs):
-                    raise ValueError(
-                        "The number of reward processing classes must match the number of reward functions."
-                    )
+                self.reward_func_names.append(get_callable_name(reward_funcs[i]))
+        self.reward_funcs = reward_funcs
 
-            self.reward_processing_classes = []
-            for reward_processing_class_i, reward_func in zip(reward_processing_classes, reward_funcs):
-                if isinstance(reward_func, PreTrainedModel):
-                    if reward_processing_class_i is None:
-                        reward_processing_class_i = AutoTokenizer.from_pretrained(reward_func.config._name_or_path)
-                    if reward_processing_class_i.pad_token_id is None:
-                        reward_processing_class_i.pad_token = reward_processing_class_i.eos_token
-                    # Set pad token ID on reward model config
-                    reward_func.config.pad_token_id = reward_processing_class_i.pad_token_id
-                self.reward_processing_classes.append(reward_processing_class_i)
+        # Handle reward processing classes for reward_funcs
+        if reward_processing_classes is None:
+            reward_processing_classes = [None] * len(reward_funcs)
+        elif not isinstance(reward_processing_classes, list):
+            reward_processing_classes = [reward_processing_classes]
         else:
-            self.reward_funcs = None
-            self.reward_func_names = []
-            self.reward_processing_classes = []
+            if len(reward_processing_classes) != len(reward_funcs):
+                raise ValueError("The number of reward processing classes must match the number of reward functions.")
+
+        self.reward_processing_classes = []
+        for i, (reward_processing_class_i, reward_func) in enumerate(
+            zip(reward_processing_classes, reward_funcs, strict=True)
+        ):
+            if isinstance(reward_func, PreTrainedModel):
+                if reward_processing_class_i is None:
+                    reward_processing_class_i = AutoTokenizer.from_pretrained(
+                        reward_func.config._name_or_path,
+                        revision=reward_model_revisions[i],
+                        trust_remote_code=args.trust_remote_code,
+                    )
+                if reward_processing_class_i.pad_token_id is None:
+                    reward_processing_class_i.pad_token = reward_processing_class_i.eos_token
+                # Set pad token ID on reward model config
+                reward_func.config.get_text_config().pad_token_id = reward_processing_class_i.pad_token_id
+            self.reward_processing_classes.append(reward_processing_class_i)
 
         # Handle reward_weights
-        if reward_funcs is not None:
-            if args.reward_weights is not None:
-                if len(args.reward_weights) != len(self.reward_funcs):
-                    raise ValueError(
-                        f"Number of reward weights ({len(args.reward_weights)}) must match number of reward "
-                        f"functions ({len(self.reward_funcs)})"
-                    )
-                self.reward_weights = torch.tensor(args.reward_weights, dtype=torch.float32)
-            else:
-                self.reward_weights = torch.ones(len(self.reward_funcs), dtype=torch.float32)
-        else:
-            self.reward_weights = None
-
-        if args.missing_eos_penalty is not None and reward_funcs is None and judge is None:
-            # Check if this is the old reward_model case
-            if reward_model is not None:
-                logger.warning(
-                    "The `missing_eos_penalty` parameter is deprecated when used with the deprecated `reward_model` parameter. "
-                    "Please use `reward_funcs` instead of `reward_model` to continue using this feature.",
-                    FutureWarning,
-                    stacklevel=2,
+        if args.reward_weights is not None:
+            if len(args.reward_weights) != len(self.reward_funcs):
+                raise ValueError(
+                    f"Number of reward weights ({len(args.reward_weights)}) must match number of reward "
+                    f"functions ({len(self.reward_funcs)})"
                 )
-            else:
-                raise ValueError("`missing_eos_penalty` is only supported when `reward_funcs` is provided.")
+            self.reward_weights = torch.tensor(args.reward_weights, dtype=torch.float32)
+        else:
+            self.reward_weights = torch.ones(len(self.reward_funcs), dtype=torch.float32)
 
         if args is None:
             raise ValueError("`args` must be provided.")
@@ -1155,12 +1145,15 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         if processing_class is None:
             raise ValueError("`processing_class` must be provided.")
 
+        # PEFT initializes the adapter weights randomly, so set_seed must be done before creating the model to ensure
+        # reproducibility.
+        set_seed(args.seed)
         model_init_kwargs = args.model_init_kwargs or {}
         if isinstance(model, str):
             model_id = model
 
             # Handle dtype in model_init_kwargs
-            dtype = model_init_kwargs.get("dtype")
+            dtype = model_init_kwargs.get("dtype", "auto")
             if isinstance(dtype, torch.dtype) or dtype == "auto" or dtype is None:
                 pass
             elif isinstance(dtype, str):
@@ -1171,6 +1164,8 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
                     "Invalid `dtype` passed to `OnlineDPOConfig`. Expected either 'auto' or a string "
                     f"representing a `torch.dtype` (e.g., 'float32'), but got {dtype}."
                 )
+            model_init_kwargs["device_map"] = model_init_kwargs.get("device_map", "auto")
+            model_init_kwargs.setdefault("trust_remote_code", args.trust_remote_code)
 
             model = AutoModelForCausalLM.from_pretrained(model_id, **model_init_kwargs)
         else:
@@ -1182,7 +1177,19 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         self.is_encoder_decoder = model.config.is_encoder_decoder
         self.is_vision_model = model.config.model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES.keys()
 
+        # PEFT
         if False:
+            if not is_peft_available():
+                raise ImportError(
+                    "You passed `peft_config` but the `peft` library is not installed. "
+                    "Install it with `pip install trl[peft]`."
+                )
+            if not isinstance(peft_config, PeftConfig):
+                raise TypeError(
+                    f"`peft_config` must be a `peft.PeftConfig` instance (e.g. `peft.LoraConfig`), "
+                    f"got {type(peft_config).__name__}."
+                )
+        if peft_config is not None or is_peft_model(model):
             pass
 
         # Enable gradient checkpointing if requested
@@ -1242,7 +1249,6 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         self.top_k = args.top_k
         self.min_p = args.min_p
         self.repetition_penalty = args.repetition_penalty
-        self.use_transformers_paged = args.use_transformers_paged
         self.vllm_mode = args.vllm_mode if args.use_vllm else None
         self.vllm_gpu_memory_utilization = args.vllm_gpu_memory_utilization
         self.vllm_tensor_parallel_size = args.vllm_tensor_parallel_size
@@ -1250,18 +1256,28 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
 
         # Handle pad token for processors or tokenizers
         if isinstance(processing_class, ProcessorMixin):
-            tokenizer = processing_class.tokenizer
+            self._tokenizer = processing_class.tokenizer
         elif isinstance(processing_class, PreTrainedTokenizerBase):
-            tokenizer = processing_class
+            self._tokenizer = processing_class
         else:
             raise TypeError("The `processing_class` must be either a `PreTrainedTokenizerBase` or a `ProcessorMixin`")
 
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+        # The model must agree with the tokenizer on the pad token from construction, so mirror it onto the model
+        # configs.
+        model.config.get_text_config().pad_token_id = self._tokenizer.pad_token_id
+        model.generation_config.pad_token_id = self._tokenizer.pad_token_id
 
-        self.pad_token = tokenizer.pad_token
-        self.pad_token_id = tokenizer.pad_token_id
-        self.eos_token_id = tokenizer.eos_token_id
+        # Every eos id the model declares [e.g. an end-of-turn token] ends a completion, not only the tokenizer's
+        eos_token_ids = model.generation_config.eos_token_id
+        if eos_token_ids is None:
+            eos_token_ids = []
+        elif isinstance(eos_token_ids, int):
+            eos_token_ids = [eos_token_ids]
+        if self._tokenizer.eos_token_id not in eos_token_ids:
+            eos_token_ids = [self._tokenizer.eos_token_id, *eos_token_ids]
+        self.eos_token_ids = eos_token_ids
 
         # Vision tokens for VLM support
         self.image_token_id = getattr(processing_class, "image_token_id", None)
@@ -1270,19 +1286,19 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         # Get the image token string for token collapsing
         self.image_token = None
         if self.image_token_id is not None:
-            self.image_token = tokenizer.decode([self.image_token_id])
+            self.image_token = self._tokenizer.decode([self.image_token_id])
 
         # Define the collator if not provided
         if data_collator is None:
-            data_collator = DPODataCollatorWithPadding(pad_token_id=self.pad_token_id)
+            data_collator = DPODataCollatorWithPadding(pad_token_id=self._tokenizer.pad_token_id)
 
-        # The trainer estimates the number of FLOPs [floating-point operations] using the number of elements in the
-        # input tensor associated with the key "input_ids". However, in Online DPO, the sampled data does not include
-        # the "input_ids" key. As a result, the trainer issues the warning: "Could not estimate the number of tokens
-        # of the input, floating-point operations will not be computed." To suppress this warning, we set the
-        # "estimate_tokens" key in the model's "warnings_issued" dictionary to True. This acts as a flag to indicate
-        # that the warning has already been issued.
-        model.warnings_issued["estimate_tokens"] = True
+        # Transformers explicitly set use_reentrant=True in the past to silence a PyTorch warning, but the default was
+        # never updated once PyTorch switched to recommending use_reentrant=False. Until that change lands upstream
+        # [see https://github.com/huggingface/transformers/pull/43203] and is released [most likely in 5.0.0], we
+        # default to the recommended non-reentrant behavior here, while preserving any user-provided value.
+        if args.gradient_checkpointing and Version(transformers.__version__) < Version("5.0.0"):
+            args.gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
+            args.gradient_checkpointing_kwargs.setdefault("use_reentrant", False)
 
         super().__init__(
             model=model,
@@ -1306,7 +1322,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         # Set up generation configuration and vLLM after super[].__init__
         if self.use_vllm:
             if getattr(getattr(model, 'vllm_engine', None), 'shared_weights', False): self.llm = model.vllm_engine; self._last_loaded_step = 0
-            self.generation_config = SamplingParams(**generation_params,
+            self.generation_config = SamplingParams(**generation_kwargs,
             **getattr(getattr(args, 'vllm_sampling_params', vLLMSamplingParams()), '_set_kwargs', {}),
             )
         else:
@@ -1314,9 +1330,9 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
             generation_kwargs = {
                 "max_new_tokens": args.max_new_tokens,
                 "do_sample": True,
-                "pad_token_id": self.pad_token_id,
-                "bos_token_id": tokenizer.bos_token_id,
-                "eos_token_id": self.eos_token_id,
+                "pad_token_id": self._tokenizer.pad_token_id,
+                "bos_token_id": self._tokenizer.bos_token_id,
+                "eos_token_id": self.eos_token_ids,
                 "temperature": self.temperature,
                 "top_k": self.top_k,
                 "top_p": self.top_p,
@@ -1331,6 +1347,8 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
             # Remove None values
             generation_kwargs = {k: v for k, v in generation_kwargs.items() if v is not None}
             self.generation_config = GenerationConfig(**generation_kwargs)
+            # Keep training-specific generation kwargs to overwrite model's original generation config
+            self.generation_kwargs = generation_kwargs
 
         if self.ref_model is not None:
             if self.is_deepspeed_enabled:
@@ -1374,79 +1392,6 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         batch = {f"prompt_{key}": value for key, value in batch.items()}
         return batch
 
-    # Same as Trainer.get_train_dataloader but skip the "remove_unused_columns".
-    @wraps(Trainer.get_train_dataloader)
-    def get_train_dataloader(self) -> DataLoader:
-        if self.train_dataset is None:
-            raise ValueError("Trainer: training requires a train_dataset.")
-
-        train_dataset = self.train_dataset
-        data_collator = self.data_collator
-        dataloader_params = {
-            "batch_size": self._train_batch_size,
-            "collate_fn": data_collator,
-            "num_workers": self.args.dataloader_num_workers,
-            "pin_memory": self.args.dataloader_pin_memory,
-            "persistent_workers": self.args.dataloader_persistent_workers,
-        }
-
-        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_train_sampler()
-            dataloader_params["drop_last"] = self.args.dataloader_drop_last
-            dataloader_params["worker_init_fn"] = seed_worker
-            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
-
-        return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
-
-    # Same as Trainer.get_eval_dataloader but skip the "remove_unused_columns".
-    @wraps(Trainer.get_eval_dataloader)
-    def get_eval_dataloader(self, eval_dataset: Optional[Union[str, Dataset]] = None) -> DataLoader:
-        if eval_dataset is None and self.eval_dataset is None:
-            raise ValueError("Trainer: evaluation requires an eval_dataset.")
-
-        # If we have persistent workers, don't do a fork bomb especially as eval datasets
-        # don't change during training
-        dataloader_key = eval_dataset if isinstance(eval_dataset, str) else "eval"
-        if (
-            hasattr(self, "_eval_dataloaders")
-            and dataloader_key in self._eval_dataloaders
-            and self.args.dataloader_persistent_workers
-        ):
-            return self.accelerator.prepare(self._eval_dataloaders[dataloader_key])
-
-        eval_dataset = (
-            self.eval_dataset[eval_dataset]
-            if isinstance(eval_dataset, str)
-            else eval_dataset
-            if eval_dataset is not None
-            else self.eval_dataset
-        )
-        data_collator = self.data_collator
-
-        dataloader_params = {
-            "batch_size": self.args.eval_batch_size,
-            "collate_fn": data_collator,
-            "num_workers": self.args.dataloader_num_workers,
-            "pin_memory": self.args.dataloader_pin_memory,
-            "persistent_workers": self.args.dataloader_persistent_workers,
-        }
-
-        if not isinstance(eval_dataset, torch.utils.data.IterableDataset):
-            dataloader_params["sampler"] = self._get_eval_sampler(eval_dataset)
-            dataloader_params["drop_last"] = self.args.dataloader_drop_last
-            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
-
-        # accelerator.free_memory() will destroy the references, so
-        # we need to store the non-prepared version
-        eval_dataloader = DataLoader(eval_dataset, **dataloader_params)
-        if self.args.dataloader_persistent_workers:
-            if hasattr(self, "_eval_dataloaders"):
-                self._eval_dataloaders[dataloader_key] = eval_dataloader
-            else:
-                self._eval_dataloaders = {dataloader_key: eval_dataloader}
-
-        return self.accelerator.prepare(eval_dataloader)
-
     def _enable_gradient_checkpointing(self, model: PreTrainedModel, args: OnlineDPOConfig) -> PreTrainedModel:
         """Enables gradient checkpointing for the model."""
         # Ensure use_cache is disabled
@@ -1459,19 +1404,11 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         else:
             model.gradient_checkpointing_enable()
 
-        gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
-        use_reentrant = (
-            "use_reentrant" not in gradient_checkpointing_kwargs or gradient_checkpointing_kwargs["use_reentrant"]
-        )
-
-        if use_reentrant:
-            model.enable_input_require_grads()
-
+        model.enable_input_require_grads()
         return model
 
     def _generate_vllm(self, prompts, images=None):
-        eos_token_id = self.eos_token_id
-        pad_token_id = self.pad_token_id
+        pad_token_id = self._tokenizer.pad_token_id
 
         # Generate completion_ids and prompt_ids based on mode
         if self.vllm_mode == "server":
@@ -1486,7 +1423,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         max_tokens = self.generation_config.max_tokens
         completion_mask = [[1] * len(ids) + [0] * (max_tokens - len(ids)) for ids in completion_ids]
         completion_ids = [
-            ids + [eos_token_id] if ids[-1] != eos_token_id and len(ids) < max_tokens else ids
+            ids + [self.eos_token_ids[0]] if ids[-1] not in self.eos_token_ids and len(ids) < max_tokens else ids
             for ids in completion_ids
         ]
         completion_ids = [ids + [pad_token_id] * (max_tokens - len(ids)) for ids in completion_ids]
@@ -1519,46 +1456,49 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         # Gather all prompts to main process
         all_prompts = gather_object(prompts_text)
         if has_images:
-            all_images = gather_object(images)
+            # The server can't take images alongside text prompts, so multimodal prompts are sent as messages, with
+            # the images inlined in place of their placeholders.
+            messages = [
+                prepare_multimodal_messages(prompt, images=[image] if image is not None else None)
+                for prompt, image in zip(prompts, images, strict=True)
+            ]
+            all_messages = gather_object(messages)
 
         if self.accelerator.is_main_process:
-            # Since 'prompts' contains 'num_generations' duplicates, we first take unique prompts, and generate
-            # num_generations outputs for each one. This is faster than generating outputs for each duplicate
-            # prompt individually.
-            ordered_set_of_prompts = all_prompts[:: self.num_generations]
+            sampling_kwargs = {
+                "n": self.num_generations,
+                "repetition_penalty": self.repetition_penalty,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "top_k": -1 if self.top_k is None else self.top_k,
+                "min_p": 0.0 if self.min_p is None else self.min_p,
+                "max_tokens": self.generation_config.max_tokens,
+                "structured_outputs_regex": self.structured_outputs_regex
+                if hasattr(self, "structured_outputs_regex")
+                else None,
+                "generation_kwargs": self.args.generation_kwargs,
+            }
             if has_images:
-                ordered_set_of_images = all_images[:: self.num_generations]
+                completion_ids = self.vllm_client.chat(messages=all_messages, **sampling_kwargs)["completion_ids"]
             else:
-                ordered_set_of_images = None
-            completion_ids = self.vllm_client.generate(
-                prompts=ordered_set_of_prompts,
-                images=ordered_set_of_images,
-                n=self.num_generations,
-                repetition_penalty=self.repetition_penalty,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=-1 if self.top_k is None else self.top_k,
-                min_p=0.0 if self.min_p is None else self.min_p,
-                max_tokens=self.generation_config.max_tokens,
-                guided_decoding_regex=self.guided_decoding_regex if hasattr(self, "guided_decoding_regex") else None,
-                generation_kwargs=self.args.generation_kwargs,
-            )
-            # Flatten: each prompt generates 2 completions
-            completion_ids = [[comp_id] for prompt_completions in completion_ids for comp_id in prompt_completions]
+                completion_ids = self.vllm_client.generate(prompts=all_prompts, **sampling_kwargs)["completion_ids"]
         else:
             completion_ids = [None] * (len(all_prompts) * 2)
 
         # Broadcast completions to all processes
         completion_ids = broadcast_object_list(completion_ids, from_process=0)
 
-        # Each process takes its slice
+        # Slice to keep only the local part of the data
         process_slice = slice(
             self.accelerator.process_index * len(prompts) * 2,
             (self.accelerator.process_index + 1) * len(prompts) * 2,
         )
         completion_ids = completion_ids[process_slice]
+        # Reorder to block layout ([p0c0, p1c0, ..., p0c1, p1c1, ...]) to match the colocate and transformers
+        # generation paths, which is what the loss expects (`rewards.split(batch_size)`).
+        completion_ids = completion_ids[0::2] + completion_ids[1::2]
 
-        # Create prompt_ids by tokenizing locally
+        # Create prompt_ids by tokenizing locally, in the same block layout (2 copies per prompt)
         prompt_inputs = self.processing_class(
             text=prompts_text,
             return_tensors="pt",
@@ -1566,13 +1506,17 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
             padding_side="left",
             add_special_tokens=False,
         )
-        prompt_ids = []
-        for prompt_tokens in prompt_inputs["input_ids"]:
-            prompt_ids.extend([prompt_tokens.tolist(), prompt_tokens.tolist()])  # 2 copies for 2 completions
+        prompt_ids = [prompt_tokens.tolist() for prompt_tokens in prompt_inputs["input_ids"]]
+        prompt_ids = prompt_ids + prompt_ids  # 2 copies for 2 completions
         return completion_ids, prompt_ids
 
     def _generate_vllm_colocate(self, prompts, images=None):
         """Generate completions using vLLM colocate mode"""
+        if self.args.vllm_enable_sleep_mode:
+            # wake up colocated vLLM instances if needed
+            empty_cache()  # required to avoid OOM in some cases
+            self.llm.wake_up(tags=["weights"])
+
         # Update model weights if needed - only after gradient accumulation completes
         if self.state.global_step != self._last_loaded_step:
             self._move_model_to_vllm()
@@ -1587,7 +1531,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         # Prepare vLLM inputs with images if available
         if images is not None:
             vllm_inputs = []
-            for prompt, image in zip(prompts_text, images):
+            for prompt, image in zip(prompts_text, images, strict=True):
                 if image is not None:
                     vllm_inputs.append({"prompt": prompt, "multi_modal_data": {"image": image}})
                 else:
@@ -1595,15 +1539,60 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         else:
             vllm_inputs = prompts_text
 
+        if self.args.vllm_enable_sleep_mode:
+            self.llm.wake_up(tags=["kv_cache"])
+
         outputs = self.llm.generate(vllm_inputs, self.generation_config, use_tqdm=False, lora_request = self.model.load_lora('online_dpo_trainer_lora_model', load_tensors = True) if getattr(self.llm, 'shared_weights', False) else None)
 
         completion_ids = [list(output.outputs[i].token_ids) for i in range(2) for output in outputs]
         prompt_ids = [list(output.prompt_token_ids) for _ in range(2) for output in outputs]
+        if self.args.vllm_enable_sleep_mode:
+            self.llm.sleep(level=2)
 
         return completion_ids, prompt_ids
 
+    def _sync_fsdp2_params_to_vllm(self, module: nn.Module):
+        # For FSDP2, module already covers all parameters, so no need for recursion
+        for name, param in module.items():
+            # When using PEFT, we need to recover the original parameter name
+            name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+            # Skip PEFT layers: they don’t exist in vLLM, and they are merged already.
+            if is_peft_model(module) and module.prefix in name:
+                continue
+            # When module to save, remove its prefix and discard the original module
+            if "original_module" in name:
+                continue
+            name = self._fix_param_name_to_vllm(name, extra_prefixes=["modules_to_save.default."])
+
+            if param.is_cpu:
+                param = param.to(self.accelerator.device)
+            param = param.full_tensor()
+
+            if self.vllm_mode == "server" and self.accelerator.is_main_process:
+                self.vllm_client.update_named_param(name, param)
+            elif self.vllm_mode == "colocate":
+
+                pass
+
+                pass
+
     def _move_model_to_vllm(self):
-        """Synchronize model weights to vLLM server with support for PEFT, DeepSpeed, and FSDP"""
+        if self.vllm_mode == "server" and self.accelerator.is_main_process:
+            # Announce one weight update for the whole model: the server prepares and finalizes it once, rather than
+            # once per tensor pushed below. Only the main process holds a client; the other ranks only take part in
+            # the parameter gathers below.
+            with self.vllm_client.weight_update():
+                self._move_model_to_vllm_inner()
+        else:
+            self._move_model_to_vllm_inner()
+
+        # Reset cache on vLLM
+        if self.vllm_mode == "server" and self.accelerator.is_main_process:
+            self.vllm_client.reset_prefix_cache()
+        elif self.vllm_mode == "colocate":
+            self.llm.reset_prefix_cache()
+
+    def _move_model_to_vllm_inner(self):
         # For DeepSpeed ZeRO-3 and FSDP, we need to gather all parameters before operations
         deepspeed_plugin = self.accelerator.state.deepspeed_plugin
         zero_stage_3 = deepspeed_plugin is not None and deepspeed_plugin.zero_stage == 3
@@ -1628,15 +1617,17 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
                     fsdp_plugin = getattr(self.accelerator.state, "fsdp_plugin", None)
                     fsdp_version = getattr(fsdp_plugin, "fsdp_version", 1) if fsdp_plugin else 1
                     if fsdp_version == 1:
-                        # use memory-efficient post-order traversal for FSDP
-                        self._sync_fsdp1_params_to_vllm(self.model)
+                        self._sync_fsdp1_params_to_vllm(
+                            self.model
+                        )  # use memory-efficient post-order traversal for FSDP
                     elif fsdp_version == 2:
                         self._sync_fsdp2_params_to_vllm(self.model)
                 else:
                     # DeepSpeed ZeRO-3 with PEFT
                     for name, param in self.model.named_parameters():
-                        # When using PEFT, we need to recover the original parameter name and discard some parameters
+                        # When using PEFT, we need to recover the original parameter name
                         name = name.removeprefix("base_model.model.").replace(".base_layer", "")
+                        # Skip PEFT layers: they don’t exist in vLLM, and they are merged already.
                         if self.model.prefix in name:
                             continue
                         # When module to save, remove its prefix and discard the original module
@@ -1675,12 +1666,6 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
 
                             pass
 
-        # Reset cache on vLLM
-        if self.vllm_mode == "server" and self.accelerator.is_main_process:
-            self.vllm_client.reset_prefix_cache()
-        elif self.vllm_mode == "colocate":
-            self.llm.reset_prefix_cache()
-
     def _sync_fsdp1_params_to_vllm(self, module: nn.Module, prefix: str = "", visited=None):
         """Memory-efficient post-order traversal of FSDP modules to extract full parameters and sync with vLLM."""
         # For FSDP1, we need to recurse into children and also use summon_full_params
@@ -1710,22 +1695,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
 
                         pass
 
-    def _sync_fsdp2_params_to_vllm(self, module: nn.Module):
-        # For FSDP2, module already covers all parameters, so no need for recursion
-        for name, param in module.items():
-            if param.is_cpu:
-                param = param.to(torch.device("cuda"))
-            param = param.full_tensor()
-
-            if self.vllm_mode == "server" and self.accelerator.is_main_process:
-                self.vllm_client.update_named_param(name, param)
-            elif self.vllm_mode == "colocate":
-
-                pass
-
-                pass
-
-    def _fix_param_name_to_vllm(self, name, extra_prefixes: Optional[list[str]] = None):
+    def _fix_param_name_to_vllm(self, name, extra_prefixes: list[str] | None = None):
         """Clean parameter names for vLLM compatibility"""
         extra_prefixes = extra_prefixes or []
         prefixes = ["_checkpoint_wrapped_module."] + extra_prefixes
@@ -1734,7 +1704,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         return name
 
     def process_vision_row(
-        self, features: dict[str, Union[list, torch.Tensor]], processing_class=None
+        self, features: dict[str, list | torch.Tensor], processing_class=None
     ) -> dict[str, list[int]]:
         """
         Process a vision row for VLM models (adapted from DPO trainer)
@@ -1763,8 +1733,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
     def _generate(self, model, prompts, images=None):
         """Generate completions using the model"""
         device = next(model.parameters()).device
-        eos_token_id = self.eos_token_id
-        pad_token_id = self.pad_token_id
+        pad_token_id = self._tokenizer.pad_token_id
 
         # Apply chat template and tokenize the input
         inputs = [{"prompt": prompt} for prompt in prompts]
@@ -1793,9 +1762,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
                 else:
                     # If the chat template doesn't use the image token, remove all instances
                     if self.vision_end_token_id is not None:
-                        escaped_eoi_token = re.escape(
-                            self.processing_class.tokenizer.decode([self.vision_end_token_id])
-                        )
+                        escaped_eoi_token = re.escape(self._tokenizer.decode([self.vision_end_token_id]))
                         prompts_text = [
                             re.sub(rf"({escaped_img_token})+{escaped_eoi_token}", "", text) for text in prompts_text
                         ]
@@ -1844,72 +1811,33 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
             if "image_grid_thw" in prompt_inputs:
                 vision_generation_kwargs["image_grid_thw"] = prompt_inputs["image_grid_thw"].repeat(2, 1)
 
-        if self.use_transformers_paged:
-            previous_attn = self.model_wrapped.config._attn_implementation
+        with (
+            profiling_context(self, "transformers.generate"),
+            unwrap_model_for_generation(
+                model,
+                self.accelerator,
+                gather_deepspeed3_params=self.args.ds3_gather_for_generation,
+                generation_kwargs=self.generation_kwargs,  # Override model.generation_config with generation_kwargs to fix transformers#42762
+            ) as unwrapped_model,
+            torch.no_grad(),
+            FSDP.summon_full_params(self.model_wrapped, recurse=False) if self.is_fsdp_enabled else nullcontext(),
+        ):
+            # Setup cache implementation if specified
+            if self.args.cache_implementation is not None:
+                unwrapped_model.generation_config.cache_implementation = self.args.cache_implementation
 
-            if is_flash_attn_2_available():
-                self.model_wrapped.config._attn_implementation = "paged_attention"
-            else:
-                self.model_wrapped.config._attn_implementation = "sdpa_paged"
-            with (
-                profiling_context(self, "transformers.generate_batch"),
-                unwrap_model_for_generation(
-                    model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
-                ) as unwrapped_model,
-                torch.no_grad(),
-                FSDP.summon_full_params(self.model_wrapped, recurse=False) if self.is_fsdp_enabled else nullcontext(),
-            ):
-                # Cast to the appropriate dtype based on training configuration
-                if self.args.bf16:
-                    unwrapped_model.to(torch.bfloat16)
-                elif self.args.fp16:
-                    unwrapped_model.to(torch.float16)
-                with torch.inference_mode():
-                    all_outputs = unwrapped_model.generate_batch(
-                        prompt_ids.tolist(),
-                        generation_config=self.generation_config,
-                        progress_bar=False,
-                    )
-                    unwrapped_model.train()  # restore training mode, as generate_batch forces eval mode
-            completion_ids = [output.generated_tokens for output in all_outputs.values()]
-            completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
-            completion_ids = pad(completion_ids, padding_value=self.pad_token_id, padding_side="right")
-            prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
-            # Restore the original attention implementation, training mode
-            self.model_wrapped.config._attn_implementation = previous_attn
+            # Standard generation
+            output = unwrapped_model.generate(
+                input_ids=prompt_ids,
+                attention_mask=prompt_mask,
+                generation_config=self.generation_config,
+                **vision_generation_kwargs,
+            )
 
-            # Extract completion_ids and create completion_mask
-            prompt_length = prompt_ids.size(1)
-            completion_ids = prompt_completion_ids[:, prompt_length:]
-            completion_ids, completion_mask = truncate_right(completion_ids, eos_token_id, pad_token_id)
+        completion_ids = output[:, prompt_ids.size(1) :]
+        completion_ids, completion_mask = truncate_right(completion_ids, self.eos_token_ids, pad_token_id)
 
-            return prompt_ids, prompt_mask, completion_ids, completion_mask
-        else:
-            # Regular generation path
-            with (
-                profiling_context(self, "transformers.generate"),
-                unwrap_model_for_generation(
-                    model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
-                ) as unwrapped_model,
-                torch.no_grad(),
-                FSDP.summon_full_params(self.model_wrapped, recurse=False) if self.is_fsdp_enabled else nullcontext(),
-            ):
-                # Setup cache implementation if specified
-                if self.args.cache_implementation is not None:
-                    unwrapped_model.generation_config.cache_implementation = self.args.cache_implementation
-
-                # Standard generation
-                output = unwrapped_model.generate(
-                    input_ids=prompt_ids,
-                    attention_mask=prompt_mask,
-                    generation_config=self.generation_config,
-                    **vision_generation_kwargs,
-                )
-
-            completion_ids = output[:, prompt_ids.size(1) :]
-            completion_ids, completion_mask = truncate_right(completion_ids, eos_token_id, pad_token_id)
-
-            return prompt_ids, prompt_mask, completion_ids, completion_mask
+        return prompt_ids, prompt_mask, completion_ids, completion_mask
 
     def _calculate_rewards_from_functions(self, prompts, completions, completion_ids_list, **reward_kwargs):
         """
@@ -1922,15 +1850,15 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         reward_kwargs["trainer_state"] = self.state
 
         for i, (reward_func, reward_processing_class) in enumerate(
-            zip(self.reward_funcs, self.reward_processing_classes)
+            zip(self.reward_funcs, self.reward_processing_classes, strict=True)
         ):
             if isinstance(reward_func, nn.Module):  # Model-based reward function
                 # Handle conversational vs text input
                 if is_conversational({"prompt": prompts[0]}):
-                    messages = [{"messages": p + c} for p, c in zip(prompts, completions)]
+                    messages = [{"messages": p + c} for p, c in zip(prompts, completions, strict=True)]
                     texts = [apply_chat_template(x, reward_processing_class)["text"] for x in messages]
                 else:
-                    texts = [p + c for p, c in zip(prompts, completions)]
+                    texts = [p + c for p, c in zip(prompts, completions, strict=True)]
 
                 # Tokenize and get reward scores
                 reward_inputs = reward_processing_class(
@@ -1982,6 +1910,13 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
                 model_kwargs["image_grid_thw"] = vision_inputs["image_grid_thw"]
 
         # Get the logprobs of the completions from the model
+        _unsloth_left_pad = None
+        if not vision_inputs:
+            _unsloth_left_pad = (prompt_mask == 0).sum(dim = 1)
+            _unsloth_order = torch.argsort(prompt_completion_mask != 0, dim = 1, descending = True, stable = True)
+            prompt_completion_ids = prompt_completion_ids.gather(1, _unsloth_order)
+            prompt_completion_mask = prompt_completion_mask.gather(1, _unsloth_order)
+            model_kwargs["attention_mask"] = prompt_completion_mask
         output = model(prompt_completion_ids, **model_kwargs)
 
         # There is 1 offset, because the model predicts the next token
@@ -1989,14 +1924,28 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         start_idx = prompt_len - 1 if prompt_len > 0 else 0
         # Only slice off the last logit when we have a prompt, otherwise we need all logits
         end_idx = -1 if prompt_len > 0 else None
-        logits = output.logits[:, start_idx:end_idx]
+        if _unsloth_left_pad is not None:
+            _unsloth_index = (start_idx - _unsloth_left_pad).unsqueeze(1) + torch.arange(
+                completion_ids.size(1), device = completion_ids.device
+            ).unsqueeze(0)
+            _unsloth_index = _unsloth_index.clamp(0, output.logits.size(1) - 1)
+            _unsloth_rows, _unsloth_len = output.logits.shape[:2]
+            _unsloth_index = _unsloth_index + _unsloth_len * torch.arange(
+                _unsloth_rows, device = _unsloth_index.device
+            ).unsqueeze(1)
+            logits = output.logits.reshape(_unsloth_rows * _unsloth_len, -1).index_select(
+                0, _unsloth_index.reshape(-1)
+            ).view(_unsloth_rows, -1, output.logits.size(-1))
+            output = None
+        else:
+            logits = output.logits[:, start_idx:end_idx]
 
         # Take the completion tokens logprob
         logprobs = torch.take_along_dim(logits.log_softmax(dim=-1), completion_ids.unsqueeze(-1), dim=2).squeeze(-1)
         return logprobs
 
     def training_step(
-        self, model: nn.Module, inputs: dict[str, Union[torch.Tensor, Any]], num_items_in_batch: Optional[int] = None
+        self, model: nn.Module, inputs: dict[str, torch.Tensor | Any], num_items_in_batch: int | None = None
     ) -> torch.Tensor:
         model.train()
 
@@ -2027,7 +1976,9 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         else:
             prompt_ids, prompt_mask, completion_ids, completion_mask = self._generate(model, prompts, images)
 
-        contain_eos_token = torch.any(completion_ids == self.eos_token_id, dim=-1)
+        contain_eos_token = torch.any(
+            torch.isin(completion_ids, torch.tensor(self.eos_token_ids, device=completion_ids.device)), dim=-1
+        )
 
         # Extract vision inputs if available for VLM support
         vision_inputs = None
@@ -2078,52 +2029,32 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         if is_conversational({"prompt": prompts[0]}):
             completions = [[{"role": "assistant", "content": completion}] for completion in completions]
 
-        # Get the reward from reward functions, judge, or deprecated reward_model
-        if self.reward_funcs is not None:
-            # First create completion_ids_list for custom reward functions
-            completion_ids_list = [completion_ids[i].tolist() for i in range(completion_ids.shape[0])]
+        # Get the reward from reward functions
+        # First create completion_ids_list for custom reward functions
+        completion_ids_list = [completion_ids[i].tolist() for i in range(completion_ids.shape[0])]
 
-            # Extract additional fields from inputs for reward functions
-            reward_kwargs = {}
-            keys = [key for key in inputs if key not in ["prompt"]]
-            for key in keys:
-                if isinstance(inputs[key], (list, tuple)):
-                    # Repeat input fields to match number of completions (2 per prompt)
-                    reward_kwargs[key] = inputs[key] * 2
-                else:
-                    reward_kwargs[key] = inputs[key]
+        # Extract additional fields from inputs for reward functions
+        reward_kwargs = {}
+        keys = [key for key in inputs if key not in ["prompt"]]
+        for key in keys:
+            if isinstance(inputs[key], (list, tuple)):
+                # Repeat input fields to match number of completions (2 per prompt)
+                reward_kwargs[key] = inputs[key] * 2
+            else:
+                reward_kwargs[key] = inputs[key]
 
-            # Calculate rewards using reward functions
-            rewards = self._calculate_rewards_from_functions(
-                prompts=2 * prompts, completions=completions, completion_ids_list=completion_ids_list, **reward_kwargs
-            )
+        # Calculate rewards using reward functions
+        rewards = self._calculate_rewards_from_functions(
+            prompts=2 * prompts, completions=completions, completion_ids_list=completion_ids_list, **reward_kwargs
+        )
 
-            # Apply missing EOS penalty if configured
-            if self.args.missing_eos_penalty is not None:
-                rewards[~contain_eos_token] -= self.args.missing_eos_penalty
+        # Apply missing EOS penalty if configured
+        if self.args.missing_eos_penalty is not None:
+            rewards[~contain_eos_token] -= self.args.missing_eos_penalty
 
-            # Split rewards into chosen/rejected pairs
-            first_half, second_half = rewards.split(batch_size)
-            mask = first_half >= second_half
-        elif self.judge is not None:
-            # Once formatted, conversational data may contain special tokens (such as <|im_start|>) that are not
-            # directly understandable by the judge and could alter its judgment. To avoid this and make the judge
-            # independent of the model's chat template, we use the raw conversation data, and apply our own chat
-            # template to it.
-            if is_conversational({"prompt": prompts[0]}):
-                environment = jinja2.Environment()
-                template = environment.from_string(SIMPLE_CHAT_TEMPLATE)
-                prompts = [template.render(messages=prompt) for prompt in prompts]
-                completions = [template.render(messages=completion) for completion in completions]
-
-            ranks_of_first_completion = self.judge.judge(
-                prompts, list(zip(completions[:batch_size], completions[batch_size:]))
-            )
-
-            # convert ranks to a True/False mask:
-            # when rank == 0, it means the first completion is the best
-            # when rank == 1, it means the second completion is the best
-            mask = torch.tensor([rank == 0 for rank in ranks_of_first_completion], device=device)
+        # Split rewards into chosen/rejected pairs
+        first_half, second_half = rewards.split(batch_size)
+        mask = first_half >= second_half
 
         batch_range = torch.arange(batch_size, device=device)
         chosen_indices = batch_range + (~mask * batch_size)
@@ -2154,7 +2085,7 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
         elif self.args.loss_type == "ipo":
             losses = (logits - 1 / (2 * self.beta)) ** 2
         else:
-            raise NotImplementedError(f"invalid loss type {self.loss_type}")
+            raise NotImplementedError(f"invalid loss type {self.args.loss_type}")
 
         loss = losses.mean()
 
@@ -2224,7 +2155,10 @@ class _UnslothOnlineDPOTrainer(BaseTrainer):
             logs: dict[str, float] = {}
 
             # all_gather + mean() to get average loss over all processes
-            tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
+            if Version(transformers.__version__) >= Version("5.2.0"):
+                tr_loss_scalar = nested_gather(tr_loss, self.args.parallel_mode).mean().item()
+            else:
+                tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
 
             # reset tr_loss to zero
             tr_loss -= tr_loss
@@ -2273,7 +2207,7 @@ class UnslothOnlineDPOTrainer(_UnslothOnlineDPOTrainer):
 Initialize OnlineDPOTrainer.
 
 Args:
-    model (`Union[str, nn.Module, PreTrainedModel]`):
+    model (`str | nn.Module | PreTrainedModel`):
         Model to be trained. Can be either:
 
         - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or a
@@ -2285,26 +2219,22 @@ Args:
     ref_model ([`~transformers.PreTrainedModel`] or `torch.nn.Module` or `None`):
         The reference model to use for training. If None is specified, the reference model will be created from the
         model.
-    judge ([`BasePairwiseJudge`]):
-        The judge to use for pairwise comparison of model completions.
-    reward_funcs (`Union[RewardFunc, list[RewardFunc]]`, *optional*):
+    reward_funcs (`RewardFunc | list[RewardFunc]`):
         Reward functions to be used for computing the rewards. To compute the rewards, we call all the reward
         functions with the prompts and completions and sum the rewards. Can be either:
 
         - A single reward function: Can be a string (path to model), a [`~transformers.PreTrainedModel`], or a
           custom callable function.
         - A list of reward functions: Must all be of compatible types.
-
-        Note: Only one of `judge`, or `reward_funcs` should be provided.
-    args ([`OnlineDPOConfig`]):
+    args ([`experimental.online_dpo.OnlineDPOConfig`]):
         The online DPO config arguments to use for training.
     data_collator ([`~transformers.DataCollator`]):
         The data collator to use for training. If None is specified, the default data collator
-        ([`DPODataCollatorWithPadding`]) will be used which will pad the sequences to the maximum length of the
-        sequences in the batch, given a dataset of paired sequences.
+        ([`experimental.utils.DPODataCollatorWithPadding`]) will be used which will pad the sequences to the
+        maximum length of the sequences in the batch, given a dataset of paired sequences.
     train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
         The dataset to use for training.
-    eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Union[Dataset, IterableDataset]]`):
+    eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Dataset | IterableDataset]`):
         The dataset to use for evaluation.
     processing_class ([`~transformers.PreTrainedTokenizerBase`] or [`~transformers.ProcessorMixin`], *optional*):
         Processing class used to process the data. If provided, will be used to automatically process the inputs
@@ -2330,21 +2260,12 @@ Args:
     preprocess_logits_for_metrics (`Callable[[torch.Tensor, torch.Tensor], torch.Tensor]`):
         The function to use to preprocess the logits before computing the metrics.
 
-    reward_model:
-
-        <Deprecated version="0.22.0">
-
-        This parameter is deprecated and will be removed in version 0.25.0. Use `reward_funcs` instead.
-
-        </Deprecated>
-
     """
     def __init__(
         self,
         model,
         ref_model = None,
         reward_funcs = None,
-        judge = None,
         args = None,
         data_collator = None,
         train_dataset = None,
@@ -2355,8 +2276,6 @@ Args:
         compute_metrics = None,
         callbacks = None,
         preprocess_logits_for_metrics = None,
-        reward_model = None,
-        reward_processing_class = None,
         **kwargs
     ):
         if args is None: args = UnslothOnlineDPOConfig()
@@ -2436,7 +2355,8 @@ Args:
                       '`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`')
         if getattr(args, 'eval_strategy', 'no') != 'no':
             eval_bsz = getattr(args, 'per_device_eval_batch_size', 8)
-            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz: args.per_device_eval_batch_size = args.per_device_train_batch_size
+            eval_generations = getattr(args, 'num_generations_eval', None) or getattr(args, 'num_generations', None) or 1
+            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz and (args.per_device_train_batch_size * args.world_size) % eval_generations == 0: args.per_device_eval_batch_size = args.per_device_train_batch_size
             if getattr(args, 'eval_accumulation_steps', None) is None and ga_steps is not None: args.eval_accumulation_steps = ga_steps
         fp16_full_eval = getattr(args, 'fp16_full_eval', False)
         if type(fp16_full_eval) is not bool: fp16_full_eval = False
@@ -2453,11 +2373,6 @@ Args:
         elif not bf16_full_eval and not fp16_full_eval:
             args.bf16_full_eval = args.bf16
             args.fp16_full_eval = args.fp16
-        _output_logits = False
-        if locals().get('compute_metrics', None) is not None: _output_logits = True
-        if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
-        if _output_logits:
-            os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
         if model is not None:
             _warnings_issued = getattr(model, 'warnings_issued', None)
             if _warnings_issued is None:
@@ -2490,14 +2405,14 @@ Args:
         __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
         from unsloth_zoo.vision_utils import UnslothVisionDataCollator
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
+            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in _unsloth_dataset_column_names(train_dataset):
                 data_collator = TransformersDataCollatorForLanguageModeling(
                     __tokenizer,
                     mlm = False,
                     mlm_probability = 0.0,
                     pad_to_multiple_of = getattr(args, 'pad_to_multiple_of', None),
                 )
-            elif isinstance(data_collator, TransformersDataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+            elif isinstance(data_collator, TransformersDataCollatorForLanguageModeling) and 'labels' in _unsloth_dataset_column_names(train_dataset):
                 data_collator = DataCollatorForSeq2Seq(
                     __tokenizer,
                     pad_to_multiple_of = getattr(args, 'pad_to_multiple_of', None),
@@ -2537,7 +2452,6 @@ Args:
             model = model,
             ref_model = ref_model,
             reward_funcs = reward_funcs,
-            judge = judge,
             args = args,
             data_collator = data_collator,
             train_dataset = train_dataset,
@@ -2547,9 +2461,7 @@ Args:
             peft_config = peft_config,
             compute_metrics = compute_metrics,
             callbacks = callbacks,
-            preprocess_logits_for_metrics = preprocess_logits_for_metrics,
-            reward_model = reward_model,
-            reward_processing_class = reward_processing_class,**kwargs)
+            preprocess_logits_for_metrics = preprocess_logits_for_metrics,**kwargs)
         if "model" in locals() and hasattr(model, "for_inference"):
             model.for_inference()
         if hasattr(self, 'neftune_hook_handle'):
@@ -2575,15 +2487,13 @@ Args:
             if _vllm_tok is not None and _pc is not None and getattr(_pc, 'chat_template', None) is not None and getattr(_vllm_tok, 'chat_template', None) is None:
                 _vllm_tok.chat_template = _pc.chat_template
         pass
+        if getattr(self, 'aux_loss_enabled', False) and hasattr(getattr(self, 'model', None), 'config'):
+            _text_config = self.model.config
+            if hasattr(_text_config, 'get_text_config'): _text_config = _text_config.get_text_config()
+            _n_experts = [getattr(_text_config, _k) for _k in ('num_local_experts', 'num_experts', 'n_routed_experts', 'moe_num_experts') if isinstance(getattr(_text_config, _k, None), int)]
+            if _n_experts and all(_n == 0 for _n in _n_experts):
+                self.aux_loss_enabled = False
+                _text_config.output_router_logits = False
+        pass
         
 pass
-
-
-if hasattr(logger, "addFilter"):
-    import logging
-    class HideLoggingMessage(logging.Filter):
-        def __init__(self, text): self.text = text
-        def filter(self, x): return not (self.text in x.getMessage())
-    pass
-    logger.addFilter(HideLoggingMessage("`use_cache=True`"))
-

@@ -1,8 +1,8 @@
 """
-2026.8.16
-2026.8.22
-5.5.0
-0.24.0
+2026.10.5
+2026.10.5
+5.17.0
+1.15.0
 __UNSLOTH_VERSIONING__
 """
 
@@ -29,8 +29,9 @@ from torch.nn import functional as F
 from unsloth_zoo.temporary_patches.common import torch_compile
 from unsloth_zoo.temporary_patches.common import _maybe_compile
 import functools
+import transformers
 from typing import Any, List, Optional, Tuple, Union, Dict, Set, Callable
-from trl.trainer.dpo_trainer import (Any, AutoProcessor, BaseImageProcessor, BaseTrainer, Callable, DPOConfig, DPOTrainer, DataCollator, DataCollatorForPreference, DataLoader, Dataset, EvalLoopOutput, F, FDivergenceConstants, FDivergenceType, FeatureExtractionMixin, IterableDataset, Literal, MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES, Optional, PartialState, Path, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, RunningMoments, SyncRefModelCallback, TrainerCallback, Union, autocast, cap_exp, contextmanager, create_model_from_path, create_reference_model, dataclass, defaultdict, disable_dropout_in_model, empty_cache, flush_left, flush_right, get_peft_model, inspect, is_comet_available, is_liger_kernel_available, is_mlflow_available, is_peft_available, is_wandb_available, log_table_to_comet_experiment, logger, logging, maybe_apply_chat_template, maybe_extract_prompt, nn, nullcontext, pad, pad_to_length, pd, peft_module_casting_to_bf16, prepare_deepspeed, prepare_fsdp, prepare_model_for_kbit_training, random, selective_log_softmax, shift_tokens_right, textwrap, torch, tqdm, wandb, warnings, Any, AutoProcessor, BaseImageProcessor, Callable, DPOConfig, DPOTrainer, DataCollator, DataCollatorForPreference, Dataset, EvalLoopOutput, F, FDivergenceConstants, FeatureExtractionMixin, IterableDataset, MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES, Optional, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, RunningMoments, SyncRefModelCallback, TrainerCallback, Union, create_model_from_path, create_reference_model, defaultdict, disable_dropout_in_model, is_comet_available, is_liger_kernel_available, is_mlflow_available, is_peft_available, is_wandb_available, logger, nn, pad, prepare_deepspeed, prepare_fsdp, torch, wandb, warnings, F, Union, flush_left, flush_right, nn, pad, shift_tokens_right, torch, BaseImageProcessor, DPOConfig, Dataset, F, FeatureExtractionMixin, IterableDataset, PartialState, PreTrainedTokenizerBase, ProcessorMixin, Union, maybe_apply_chat_template, maybe_extract_prompt, F, PeftModel, PreTrainedModel, is_peft_available, logger, torch, DPOTrainer, DataCollator, DataCollatorForPreference, F, F, Union, flush_left, flush_right, nn, pad, pad_to_length, selective_log_softmax, torch, F, Union, pad, pad_to_length, torch)
+from trl.trainer.dpo_trainer import (Any, AutoProcessor, BaseTunerLayer, BitsAndBytesConfig, Callable, DPOConfig, DPOTrainer, DataCollator, DataCollatorForPreference, DataCollatorForVisionPreference, DataLoader, Dataset, DatasetDict, EvalPrediction, F, Hasher, IterableDataset, IterableDatasetDict, LoraConfig, Path, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, SyncRefModelCallback, TrainerCallback, Version, _BaseTrainer, _tokenize, accelerate, add_fused_lm_head, apply_chat_template, broadcast_object_list, common_prefix_length, concatenate_datasets, contextlib, create_model_from_path, dataclass, defaultdict, disable_dropout_in_model, disable_gradient_checkpointing, extract_prompt, get_act_offloading_ctx_manager, get_config_model_id, get_peft_model, global_then_local_main_first, hash_module, is_conversational, is_peft_available, is_peft_model, json, logger, math, os, pad, peft, prepare_deepspeed, prepare_fsdp, set_seed, textwrap, torch, tqdm, transformers, use_adapter, warnings, AutoProcessor, BaseTunerLayer, BitsAndBytesConfig, Callable, DPOConfig, DPOTrainer, DataCollator, DataCollatorForPreference, DataCollatorForVisionPreference, Dataset, DatasetDict, EvalPrediction, F, IterableDataset, IterableDatasetDict, LoraConfig, PeftConfig, PeftModel, PreTrainedModel, PreTrainedTokenizerBase, ProcessorMixin, SyncRefModelCallback, TrainerCallback, Version, accelerate, add_fused_lm_head, contextlib, create_model_from_path, defaultdict, disable_dropout_in_model, get_act_offloading_ctx_manager, get_config_model_id, get_peft_model, hash_module, is_peft_available, is_peft_model, logger, os, pad, peft, prepare_deepspeed, prepare_fsdp, set_seed, torch, transformers, warnings, F, PeftModel, PreTrainedModel, is_peft_available, logger, os, peft, torch)
 
 
 import os
@@ -46,7 +47,7 @@ from torch.nn import functional as F
 import inspect
 from transformers import DataCollatorForSeq2Seq, DataCollatorForLanguageModeling as TransformersDataCollatorForLanguageModeling
 from transformers.training_args import ParallelMode
-from unsloth_zoo.device_type import DEVICE_TYPE, device_synchronize
+from unsloth_zoo.device_type import DEVICE_TYPE, DEVICE_TYPE_TORCH, device_synchronize
 
 # Wrap trainer with padding to right and enable training mode
 import functools
@@ -61,13 +62,23 @@ try:
     from unsloth.models._utils import _unsloth_reset_stray_compile_cache
 except Exception:
     def _unsloth_reset_stray_compile_cache(self): pass
+try:
+    from unsloth.models._utils import _unsloth_dataset_column_names
+except Exception:
+    def _unsloth_dataset_column_names(dataset): return dataset.column_names
 # Drops/renames config arguments the installed TRL no longer accepts, so a
 # script pinned to an older TRL keeps working after an upgrade. Falls back to
 # the historical raw passthrough so this can never break trainer construction.
 try:
     from unsloth.models.rl_config_compat import filter_config_init_kwargs as _unsloth_filter_config_init_kwargs
+    # A cache file generated here can be imported by an older Unsloth whose filter
+    # predates `mirrored_from`, so drop the argument rather than raise TypeError.
+    if "mirrored_from" not in inspect.signature(_unsloth_filter_config_init_kwargs).parameters:
+        _unsloth_filter_config_init_kwargs_old = _unsloth_filter_config_init_kwargs
+        def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw):
+            return _unsloth_filter_config_init_kwargs_old(config_class, kwargs)
 except Exception:
-    def _unsloth_filter_config_init_kwargs(config_class, kwargs): return kwargs
+    def _unsloth_filter_config_init_kwargs(config_class, kwargs, **kw): return kwargs
 def prepare_for_training_mode(f):
     @functools.wraps(f)
     def wrapper(self, *args, **kwargs):
@@ -161,6 +172,7 @@ def chunked_hidden_states_selective_log_softmax(
         if os.environ.get("UNSLOTH_GRPO_MAX_ROWS_PER_CHUNK", "0").strip().isdigit()
         else 0
     ),
+    lm_head_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # All Unsloth Zoo code licensed under AGPL3
     # Reshape on this tensor's own last dim: a no-op, so a wrong-width caller
@@ -185,8 +197,20 @@ def chunked_hidden_states_selective_log_softmax(
         chunks = max(chunks, -(-n_rows // max_rows_per_chunk))
         chunks = min(chunks, max(n_rows, 1))
 
-    chunked_hidden_states = torch.chunk(flat_hidden_states, chunks=chunks, dim=0)
-    chunked_index = torch.chunk(flat_index, chunks=chunks, dim=0)
+    # A one-row chunk's head gradient is a K=1 matmul Inductor mis-lowers under dynamic shapes (illegal
+    # memory access or NaN head gradients, torch 2.13), so keep chunks at 2+ rows when the head trains.
+    # Exactly `chunks` row ranges, so the unrolled loop length never depends on T: torch.chunk
+    # returns ceil(T / ceil(T / chunks)) pieces and recompiled per new count; tensor_split guards
+    # on T % chunks. At most rows // 2 chunks when the head trains keeps every piece at 2+ rows.
+    lm_head_grad = torch.is_grad_enabled() and lm_head.requires_grad
+    if lm_head_grad and flat_hidden_states.shape[0] < 2 * chunks:
+        chunks = max(flat_hidden_states.shape[0] // 2, 1)
+
+    n_rows = flat_hidden_states.shape[0]
+    chunks = max(1, min(chunks, n_rows))
+    bounds = [(i * n_rows) // chunks for i in range(chunks + 1)]
+    chunked_hidden_states = [flat_hidden_states[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    chunked_index = [flat_index[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
 
     all_per_token_logps = []
 
@@ -201,7 +225,10 @@ def chunked_hidden_states_selective_log_softmax(
         # bit-identical to before.
         chunk_hidden_states = chunk_hidden_states.to(device = lm_head.device, dtype = lm_head.dtype)
         chunk_index = chunk_index.to(lm_head.device)
-        chunk_logits = chunk_hidden_states @ lm_head.t()
+        if lm_head_bias is None:
+            chunk_logits = chunk_hidden_states @ lm_head.t()
+        else:
+            chunk_logits = torch.nn.functional.linear(chunk_hidden_states, lm_head, lm_head_bias)
 
         if logit_scale_multiply != 0.0:
             chunk_logits = chunk_logits * logit_scale_multiply
@@ -234,8 +261,14 @@ def chunked_selective_log_softmax(
     temperature: float = 1.0,
     chunks: int = 4,
 ):
-    chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = chunks, dim = 0)
-    chunked_index  = torch.chunk(index.reshape(-1), chunks = chunks, dim = 0)
+    # Fixed `chunks` row ranges; see chunked_hidden_states_selective_log_softmax.
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    flat_index = index.reshape(-1)
+    # Fewer rows than chunks: one row per range, as torch.chunk did, never empty ranges.
+    chunks = max(1, min(chunks, flat_logits.shape[0]))
+    bounds = [(i * flat_logits.shape[0]) // chunks for i in range(chunks + 1)]
+    chunked_logits = [flat_logits[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
+    chunked_index  = [flat_index[a:b] for a, b in zip(bounds[:-1], bounds[1:])]
     all_per_token_logps = []
     # Per-chunk selective_log_softmax.
     for chunk_logits, chunk_index in zip(chunked_logits, chunked_index):
@@ -399,7 +432,8 @@ def autotune_batch_and_chunks(
 
     if valid_indices.shape[0] == 0:
         #This means your GPU will OOM
-        return 4, final_m
+        # Capped at the row count: unsloth's no-grad pass divides rows by this without max(1, ...).
+        return max(1, min(4, total_input_rows)), final_m
 
     best_idx = valid_indices[0].item()
     final_b = int(b_vals[best_idx].item())
@@ -494,159 +528,120 @@ Using [`~transformers.HfArgumentParser`] we can turn this class into
 command line.
 
 Parameters:
-    > Parameters that control the model and reference model
+    > Parameters that control the model
 
     model_init_kwargs (`dict[str, Any]`, *optional*):
-        Keyword arguments for `AutoModelForCausalLM.from_pretrained`, used when the `model` argument of the
-        [`DPOTrainer`] is provided as a string.
-    ref_model_init_kwargs (`dict[str, Any]`, *optional*):
-        Keyword arguments for `AutoModelForCausalLM.from_pretrained`, used when the `ref_model` argument of the
-        [`DPOTrainer`] is provided as a string.
-    model_adapter_name (`str`, *optional*):
-        Name of the train target PEFT adapter, when using LoRA with multiple adapters.
-    ref_adapter_name (`str`, *optional*):
-        Name of the reference PEFT adapter, when using LoRA with multiple adapters.
-    force_use_ref_model (`bool`, *optional*, defaults to `False`):
-        If you provide a PEFT model as the active model and wish to use a different model for the `ref_model`, set
-        this flag to `True`.
+        Keyword arguments for [`~transformers.AutoModelForCausalLM.from_pretrained`], used when the `model`
+        argument of the [`DPOTrainer`] is provided as a string. The `revision` value is also used when loading the
+        processing class.
+    trust_remote_code (`bool`, *optional*, defaults to `False`):
+        Whether to allow loading models and tokenizers that ship custom Python code from the Hub. Forwarded to
+        [`~transformers.AutoModelForCausalLM.from_pretrained`] and [`~transformers.AutoProcessor.from_pretrained`].
+    router_aux_loss_coef (`float`, *optional*):
+        Coefficient of the load-balancing auxiliary loss for Mixture-of-Experts (MoE) models, added to the training
+        loss with this weight. When not set, the value declared by the model config is used. Set to `0.0` to
+        disable it. Fails when used with a non-MoE model.
     disable_dropout (`bool`, *optional*, defaults to `True`):
         Whether to disable dropout in the model and reference model.
-    use_logits_to_keep (`bool`, *optional*, defaults to `False`):
-        If `True`, only a specified number of logits are computed in the forward pass. This can be useful for
-        saving memory and speeding up training by not computing the logits for all tokens, especially in scenarios
-        when working with very long prompts where labels are ignored (-100).
 
     > Parameters that control the data preprocessing
 
     dataset_num_proc (`int`, *optional*):
         Number of processes to use for processing the dataset.
-    pad_token (`str`, *optional*):
-        Token used for padding. If `None`, it defaults to `processing_class.pad_token`, or if that is also `None`,
-        it falls back to `processing_class.eos_token`.
-    label_pad_token_id (`int`, *optional*, defaults to `-100`):
-        Padding value to use for labels.
-    max_prompt_length (`int` or `None`, *optional*, defaults to `512`):
-        Maximum length of the prompt.
-    max_completion_length (`int`, *optional*):
-        Maximum length of the completion.
     max_length (`int` or `None`, *optional*, defaults to `1024`):
-        Maximum length of the full sequence (prompt + completion).
-    truncation_mode (`str`, *optional*, defaults to `"keep_end"`):
-        Truncation mode to use when the sequence exceeds `max_length`. Possible values are `"keep_end"` and
-        `"keep_start"`.
+        Maximum length of the tokenized sequence. Sequences longer than `max_length` are truncated from the left or
+        right depending on the `truncation_mode`. If `None`, no truncation is applied.
+    truncation_mode (`str`, *optional*, defaults to `"keep_start"`):
+        Truncation mode to use when the sequence exceeds `max_length`. The only supported value is `"keep_start"`.
+        The `"keep_end"` value is deprecated and will be removed in v2.0.0.
     padding_free (`bool`, *optional*, defaults to `False`):
         Whether to perform forward passes without padding by flattening all sequences in the batch into a single
         continuous sequence. This reduces memory usage by eliminating padding overhead. Currently, this is only
-        supported with the `flash_attention_2` attention implementation, which can efficiently handle the flattened
-        batch structure.
+        supported with the FlashAttention 2 or 3, which can efficiently handle the flattened batch structure.
+        Temporarily unavailable: since the DPO refactor, setting it to `True` warns and falls back to standard
+        padding. It is planned to return in a future update.
+    pad_to_multiple_of (`int`, *optional*):
+        If set, the sequences will be padded to a multiple of this value.
     precompute_ref_log_probs (`bool`, *optional*, defaults to `False`):
-        Whether to precompute the log probabilities from the reference model. Setting this to `True` allows
-        training without needing the reference model during training, which can help reduce GPU memory usage. If
-        set to `False` (default), the reference model will be used during training to compute log probabilities
-        on-the-fly.
+        Whether to precompute the reference model log probabilities for the entire training dataset before
+        training. This allows to save memory during training, as the reference model does not need to be kept in
+        memory.
     precompute_ref_batch_size (`int`, *optional*):
         Batch size to use when precomputing reference model log probabilities. This can be set higher than the
         training batch size to speed up preprocessing. If `None`, defaults to `per_device_train_batch_size` for
         training and `per_device_eval_batch_size` for evaluation.
-    tools (`Optional[list[Union[dict, Callable]]]`, *optional*):
-        List of tools (callable functions) that will be accessible to the model. If the template does not support
-        function calling, this argument will have no effect.
 
     > Parameters that control the training
 
-    loss_type (`str` or `list[str]`, *optional*, defaults to `"sigmoid"`):
-        Type of loss to use. Possible values are:
-
-            - `"sigmoid"`: sigmoid loss from the original [DPO](https://huggingface.co/papers/2305.18290) paper.
-            - `"hinge"`: hinge loss on the normalized likelihood from the
-              [SLiC](https://huggingface.co/papers/2305.10425) paper.
-            - `"ipo"`: IPO loss from the [IPO](https://huggingface.co/papers/2310.12036) paper.
-            - `"exo_pair"`: pairwise EXO loss from the [EXO](https://huggingface.co/papers/2402.00856) paper.
-            - `"nca_pair"`: pairwise NCA loss from the [NCA](https://huggingface.co/papers/2402.05369) paper.
-            - `"robust"`: unbiased estimate of the DPO loss that is robust to preference noise from the [Robust
-              DPO](https://huggingface.co/papers/2403.00409) paper.
-            - `"bco_pair"`: pairwise BCO loss from the [BCO](https://huggingface.co/papers/2404.04656) paper.
-            - `"sppo_hard"`: SPPO loss with hard label from the [SPPO](https://huggingface.co/papers/2405.00675)
-              paper.
-            - `"aot"`: AOT loss for paired datasets from the [AOT](https://huggingface.co/papers/2406.05882) paper.
-            - `"aot_pair"`: AOT loss for unpaired datasets from the [AOT](https://huggingface.co/papers/2406.05882)
-              paper.
-            - `"discopop"`: DiscoPOP (a.k.a Log-Ratio Modulated Loss, LRML) loss from the
-              [DiscoPOP](https://huggingface.co/papers/2406.08414) paper.
-            - `"apo_zero"`: APO-zero loss from the [APO](https://huggingface.co/papers/2408.06266) paper.
-            - `"apo_down"`: APO-down loss from the [APO](https://huggingface.co/papers/2408.06266) paper.
-            - `"sft"`: Negative log-likelihood loss (standard supervised fine-tuning loss).
-
-        Multiple loss types can be combined using comma separation (e.g., `["sigmoid", "bco_pair", "sft"]` for
-        [MPO](https://huggingface.co/papers/2411.10442)). The `loss_weights` parameter can be used to specify
-        corresponding weights for each loss type.
-
-    use_liger_loss (`bool`, *optional*, defaults to `False`):
-        Whether to use Liger loss.
-    base_model_attribute_name (`str`, *optional*, defaults to `"model"`):
-        Name of the attribute in the model that contains the base model. This is used to get the base model from
-        the model when the model does not have a `get_decoder` method in the case when `use_liger_loss` is `True`.
-    beta (`float`, *optional*, defaults to `0.1`):
-        Parameter controlling the deviation from the reference model. Higher β means less deviation from the
-        reference model. For the IPO loss (`loss_type="ipo"`), β is the regularization parameter denoted by τ in
-        the [paper](https://huggingface.co/papers/2310.12036).
-    f_divergence_type ([`FDivergenceType`] or `str`, *optional*, defaults to `FDivergenceType.REVERSE_KL`):
-        Type of f-divergence regularization function to compute divergence between policy and reference model.
-    f_alpha_divergence_coef (`float`, *optional*, defaults to `1.0`):
-        α coefficient in the α-divergence u^-α regularization function for DPO loss.
-    reference_free (`bool`, *optional*, defaults to `False`):
-        Whether to ignore the provided reference model and implicitly use a reference model that assigns equal
-        probability to all responses.
-    label_smoothing (`float`, *optional*, defaults to `0.0`):
-        Robust DPO label smoothing parameter from the [cDPO report](https://ericmitchell.ai/cdpo.pdf) and [Robust
-        DPO](https://huggingface.co/papers/2403.00409) paper that should be between `0.0` and `0.5`.
-    use_weighting (`bool`, *optional*, defaults to `False`):
-        Whether to weight the loss as done in the [WPO paper](https://huggingface.co/papers/2406.11827).
-    rpo_alpha (`float`, *optional*):
-        α parameter from the [RPO paper](https://huggingface.co/papers/2404.19733) (v3), which controls the
-        weighting of the NLL term in the loss. If `None`, no weighting is applied and the loss is the same as the
-        DPO loss. The paper recommends `rpo_alpha=1.0`.
-    ld_alpha (`float`, *optional*):
-        α parameter from the [LD-DPO paper](https://huggingface.co/papers/2409.06411), which controls the weighting
-        of the verbose token log-probabilities in responses. If `None`, no weighting is applied to the verbose
-        part, and the loss is equivalent to the standard DPO loss. The paper recommends setting `ld_alpha` between
-        `0.0` and `1.0`.
-    discopop_tau (`float`, *optional*, defaults to `0.05`):
-        τ/temperature parameter from the [DiscoPOP](https://huggingface.co/papers/2406.08414) paper, which controls
-        the shape of log ratio modulated loss. The paper recommends the default value `discopop_tau=0.05`.
+    loss_type (`list[str]`, *optional*, defaults to `["sigmoid"]`):
+        Type of loss to use. Possible values are: `'sigmoid'`, `'hinge'`, `'ipo'`, `'exo_pair'`, `'nca_pair'`,
+        `'robust'`, `'bco_pair'`, `'sppo_hard'`, `'aot'`, `'aot_unpaired'`, `'apo_zero'`, `'apo_down'`,
+        `'discopop'`, `'sft'`, `'sigmoid_norm'`. If multiple loss types are provided, they will be combined using
+        the weights specified in `loss_weights`.
     loss_weights (`list[float]`, *optional*):
         List of loss weights for multi-loss combinations. Used when combining multiple loss types. Example: `[0.8,
-        0.2, 1.0]` for [MPO](https://huggingface.co/papers/2411.10442). If not provided, defaults to equal weights
-        (`1.0`) for all loss types.
+        0.2, 1.0]` for MPO. If not provided, defaults to equal weights (`1.0`) for all loss types.
+    ld_alpha (`float`, *optional*):
+        α parameter from the LD-DPO paper, which controls the weighting of the verbose token log-probabilities in
+        responses. If `None`, no weighting is applied to the verbose part, and the loss is equivalent to the
+        standard DPO loss. Must be in [0.0, 1.0]: `ld_alpha=1.0` applies no weighting, and `ld_alpha=0.0` masks
+        tokens beyond shared lengths.
+    f_divergence_type (`str`, *optional*, defaults to `"reverse_kl"`):
+        f-divergence regularizer between policy and reference (f-DPO paper). Possible values are: `reverse_kl`
+        (default), `forward_kl`, `js_divergence`, `alpha_divergence`. Only the loss types built on the
+        chosen-rejected reward difference support a non-default value: `'sigmoid'`, `'sigmoid_norm'`, `'hinge'`,
+        `'ipo'`, `'exo_pair'`, `'robust'`, `'discopop'`, `'sft'`. The other loss types have no valid f-divergence
+        generalization and are rejected with a non-default value.
+    f_alpha_divergence_coef (`float`, *optional*, defaults to `0.5`):
+        α coefficient for the α-divergence u^-α regularizer, used only when `f_divergence_type='alpha_divergence'`.
+    label_smoothing (`float`, *optional*, defaults to `0.0`):
+        Label smoothing parameter used in Robust DPO and EXO. In Robust DPO, it is interpreted as the probability
+        that a preference label is flipped and must lie in [0.0, 0.5); a typical value recommended by the Robust
+        DPO paper is 0.1. In EXO, it corresponds to the ε label smoothing parameter, for which the paper recommends
+        a typical value of 1e-3.
+    beta (`float`, *optional*, defaults to `0.1`):
+        Parameter controlling the deviation from the reference model. Higher β means less deviation from the
+        reference model. For the IPO loss (`loss_type='ipo'`), this value is the regularization parameter denoted
+        by τ in the [paper](https://huggingface.co/papers/2310.12036).
+    use_weighting (`bool`, *optional*, defaults to `False`):
+        Whether to apply [WPO](https://huggingface.co/papers/2406.11827)-style weighting to preference pairs using
+        the policy's length-normalized sequence probabilities.
+    discopop_tau (`float`, *optional*, defaults to `0.05`):
+        τ/temperature parameter from the DiscoPOP paper, which controls the shape of the log-ratio modulated loss
+        when using `loss_type='discopop'`. The paper recommends the default value `discopop_tau=0.05`.
+    activation_offloading (`bool`, *optional*, defaults to `False`):
+        Whether to offload the activations to the CPU.
     sync_ref_model (`bool`, *optional*, defaults to `False`):
         Whether to synchronize the reference model with the active model every `ref_model_sync_steps` steps, using
         the `ref_model_mixup_alpha` parameter. This synchronization originates from the
-        [TR-DPO](https://huggingface.co/papers/2404.09656) paper.
+        [TR-DPO](https://huggingface.co/papers/2404.09656) paper. `sync_ref_model=True` is not yet compatible with
+        PEFT or `precompute_ref_log_probs=True`.
     ref_model_mixup_alpha (`float`, *optional*, defaults to `0.6`):
-        α parameter from the [TR-DPO](https://huggingface.co/papers/2404.09656) paper, which controls the mix
-        between the current policy and the previous reference policy during updates. The reference policy is
-        updated according to the equation: `π_ref = α * π_θ + (1 - α) * π_ref_prev`. To use this parameter, you
-        must set `sync_ref_model=True`.
+        α parameter from the TR-DPO paper, which controls the mix between the current policy and the previous
+        reference policy during updates. The reference policy is updated according to the equation: `π_ref = α *
+        π_θ + (1 - α) * π_ref_prev`. To use this parameter, you must set `sync_ref_model=True`.
     ref_model_sync_steps (`int`, *optional*, defaults to `512`):
         τ parameter from the [TR-DPO](https://huggingface.co/papers/2404.09656) paper, which determines how
         frequently the current policy is synchronized with the reference policy. To use this parameter, you must
         set `sync_ref_model=True`.
 
-    > Parameters that control the logging
-
-    generate_during_eval (`bool`, *optional*, defaults to `False`):
-        Whether to generate and log completions from both the model and the reference model to W&B or Comet during
-        evaluation.
-
     > Deprecated parameters
 
-    padding_value:
+    pad_token:
 
-        <Deprecated version="0.24.0">
+        <Deprecated version="1.1.0">
 
-        This parameter is deprecated and will be removed in version 0.25.0. Use `pad_token` (`str`) instead.
+        Parameter `pad_token` is deprecated and will be removed in version v2.0.0. Set `tokenizer.pad_token`
+        directly and pass it as `processing_class` to the trainer instead.
 
         </Deprecated>
+
+> [!NOTE]
+> These parameters have default values different from [`~transformers.TrainingArguments`]:
+> - `logging_steps`: Defaults to `10` instead of `500`.
+> - `gradient_checkpointing`: Defaults to `True` instead of `False`.
+> - `bf16`: Defaults to `True` if `fp16` is not set, instead of `False`.
+> - `learning_rate`: Defaults to `1e-6` instead of `5e-5`.
 
     """
     vllm_sampling_params: Optional[Any] = field(
@@ -718,7 +713,9 @@ Parameters:
         report_to = 'none',
         run_name = None,
         project = 'huggingface',
-        trackio_space_id = 'trackio',
+        trackio_space_id = None,
+        trackio_bucket_id = None,
+        trackio_static_space_id = None,
         eval_strategy = 'no',
         eval_steps = None,
         eval_delay = 0,
@@ -749,7 +746,7 @@ Parameters:
         restore_callback_states_from_checkpoint = False,
         full_determinism = False,
         seed = 3407,
-        data_seed = 3407,
+        data_seed = None,
         use_cpu = False,
         accelerator_config = None,
         parallelism_config = None,
@@ -758,6 +755,8 @@ Parameters:
         dataloader_pin_memory = True,
         dataloader_persistent_workers = False,
         dataloader_prefetch_factor = None,
+        dataloader_multiprocessing_context = None,
+        dataloader_in_order = True,
         remove_unused_columns = True,
         label_names = None,
         train_sampling_strategy = 'random',
@@ -765,6 +764,7 @@ Parameters:
         ddp_find_unused_parameters = None,
         ddp_bucket_cap_mb = None,
         ddp_broadcast_buffers = None,
+        ddp_static_graph = None,
         ddp_backend = None,
         ddp_timeout = 1800,
         fsdp = None,
@@ -776,43 +776,31 @@ Parameters:
         do_eval = False,
         do_predict = False,
         resume_from_checkpoint = None,
-        warmup_ratio = None,
-        logging_dir = None,
         local_rank = -1,
         model_init_kwargs = None,
-        ref_model_init_kwargs = None,
-        model_adapter_name = None,
-        ref_adapter_name = None,
-        force_use_ref_model = False,
+        trust_remote_code = False,
+        router_aux_loss_coef = None,
         disable_dropout = True,
-        use_logits_to_keep = False,
         dataset_num_proc = None,
-        pad_token = None,
-        label_pad_token_id = -100,
-        max_prompt_length = 512,
-        max_completion_length = None,
         max_length = 1024,
-        truncation_mode = 'keep_end',
+        truncation_mode = 'keep_start',
         padding_free = None,
+        pad_to_multiple_of = None,
         precompute_ref_log_probs = False,
         precompute_ref_batch_size = None,
-        tools = None,
-        use_liger_loss = False,
-        base_model_attribute_name = 'model',
-        beta = 0.1,
-        f_alpha_divergence_coef = 1.0,
-        reference_free = False,
-        label_smoothing = 0.0,
-        use_weighting = False,
-        rpo_alpha = None,
-        ld_alpha = None,
-        discopop_tau = 0.05,
         loss_weights = None,
+        ld_alpha = None,
+        f_divergence_type = 'reverse_kl',
+        f_alpha_divergence_coef = 0.5,
+        label_smoothing = 0.0,
+        beta = 0.1,
+        use_weighting = False,
+        discopop_tau = 0.05,
+        activation_offloading = False,
         sync_ref_model = False,
         ref_model_mixup_alpha = 0.6,
         ref_model_sync_steps = 512,
-        generate_during_eval = False,
-        padding_value = None,
+        pad_token = None,
         vllm_sampling_params = None,
         unsloth_num_chunks = -1,
         unsloth_logit_chunk_multiplier = None,
@@ -822,6 +810,22 @@ Parameters:
     ):
         if learning_rate < 1e-7: print(f'Unsloth: Your learning rate of `{learning_rate}` is too small and less than 1e-7! Consider increasing it, otherwise gradient updates will be close to 0!')
         if learning_rate > 1: print(f'Unsloth: Your learning rate of `{learning_rate}` is way too larger > 1! Consider decreasing it to 1e-1, otherwise gradient updates will explode!')
+        _unsloth_fsdp2 = os.environ.get('FSDP_VERSION', '').strip() == '2'
+        _unsloth_fsdp_cfg = fsdp_config
+        if fsdp and isinstance(_unsloth_fsdp_cfg, str) and os.path.isfile(_unsloth_fsdp_cfg):
+            try:
+                import json as _unsloth_json
+                with open(_unsloth_fsdp_cfg, encoding = 'utf-8') as _unsloth_f:
+                    _unsloth_fsdp_cfg = _unsloth_json.load(_unsloth_f)
+            except Exception:
+                _unsloth_fsdp_cfg = None
+        if fsdp and _unsloth_fsdp_cfg is None:
+            _unsloth_fsdp_cfg = {}
+        if fsdp and isinstance(_unsloth_fsdp_cfg, dict):
+            _unsloth_fsdp2 = _unsloth_fsdp2 or str(_unsloth_fsdp_cfg.get('fsdp_version', _unsloth_fsdp_cfg.get('version', 2))) == '2'
+        if _unsloth_fsdp2 and str(getattr(optim, 'value', optim)) == 'adamw_8bit':
+            print("Unsloth: FSDP2 shards parameters as DTensors, which bitsandbytes' 8-bit optimizers cannot step. Switching optim = 'adamw_8bit' to 'adamw_torch_fused'.")
+            optim = 'adamw_torch_fused'
         if num_train_epochs is None:
             num_train_epochs = 3.0  # Default to 3 epochs if None, max_steps will override
         if output_dir is None and save_strategy == 'steps' and save_steps == 500:
@@ -836,6 +840,15 @@ Parameters:
                 _unsloth_get_dataset_num_proc = None
         if _unsloth_get_dataset_num_proc is not None:
             dataset_num_proc = _unsloth_get_dataset_num_proc(dataset_num_proc, serial_as_none = True)
+        if os.environ.get('UNSLOTH_ENABLE_FLEX_ATTENTION', '0') == '1':
+            from unsloth_zoo.flex_attention import HAS_FLEX_ATTENTION
+            if HAS_FLEX_ATTENTION and pad_to_multiple_of is None:
+                from unsloth_zoo.flex_attention import FLEX_ATTENTION_BLOCK_SIZE
+                pad_to_multiple_of = FLEX_ATTENTION_BLOCK_SIZE
+        
+        if eval_steps is not None and eval_strategy != 'steps':
+            print(f'Unsloth: `eval_steps = {eval_steps}` is ignored because `eval_strategy` is {getattr(eval_strategy, "value", eval_strategy)!r}. Set `eval_strategy = "steps"` to evaluate every `eval_steps` steps.')
+        
         
         # One dict so the filter sees the mirrored parameters AND `**kwargs`:
         # filtering kwargs alone would double-bind any argument TRL renamed,
@@ -889,6 +902,8 @@ Parameters:
             run_name = run_name,
             project = project,
             trackio_space_id = trackio_space_id,
+            trackio_bucket_id = trackio_bucket_id,
+            trackio_static_space_id = trackio_static_space_id,
             eval_strategy = eval_strategy,
             eval_steps = eval_steps,
             eval_delay = eval_delay,
@@ -928,6 +943,8 @@ Parameters:
             dataloader_pin_memory = dataloader_pin_memory,
             dataloader_persistent_workers = dataloader_persistent_workers,
             dataloader_prefetch_factor = dataloader_prefetch_factor,
+            dataloader_multiprocessing_context = dataloader_multiprocessing_context,
+            dataloader_in_order = dataloader_in_order,
             remove_unused_columns = remove_unused_columns,
             label_names = label_names,
             train_sampling_strategy = train_sampling_strategy,
@@ -935,6 +952,7 @@ Parameters:
             ddp_find_unused_parameters = ddp_find_unused_parameters,
             ddp_bucket_cap_mb = ddp_bucket_cap_mb,
             ddp_broadcast_buffers = ddp_broadcast_buffers,
+            ddp_static_graph = ddp_static_graph,
             ddp_backend = ddp_backend,
             ddp_timeout = ddp_timeout,
             fsdp = fsdp,
@@ -946,44 +964,32 @@ Parameters:
             do_eval = do_eval,
             do_predict = do_predict,
             resume_from_checkpoint = resume_from_checkpoint,
-            warmup_ratio = warmup_ratio,
-            logging_dir = logging_dir,
             local_rank = local_rank,
             model_init_kwargs = model_init_kwargs,
-            ref_model_init_kwargs = ref_model_init_kwargs,
-            model_adapter_name = model_adapter_name,
-            ref_adapter_name = ref_adapter_name,
-            force_use_ref_model = force_use_ref_model,
+            trust_remote_code = trust_remote_code,
+            router_aux_loss_coef = router_aux_loss_coef,
             disable_dropout = disable_dropout,
-            use_logits_to_keep = use_logits_to_keep,
             dataset_num_proc = dataset_num_proc,
-            pad_token = pad_token,
-            label_pad_token_id = label_pad_token_id,
-            max_prompt_length = max_prompt_length,
-            max_completion_length = max_completion_length,
             max_length = max_length,
             truncation_mode = truncation_mode,
             padding_free = padding_free,
+            pad_to_multiple_of = pad_to_multiple_of,
             precompute_ref_log_probs = precompute_ref_log_probs,
             precompute_ref_batch_size = precompute_ref_batch_size,
-            tools = tools,
-            use_liger_loss = use_liger_loss,
-            base_model_attribute_name = base_model_attribute_name,
-            beta = beta,
-            f_alpha_divergence_coef = f_alpha_divergence_coef,
-            reference_free = reference_free,
-            label_smoothing = label_smoothing,
-            use_weighting = use_weighting,
-            rpo_alpha = rpo_alpha,
-            ld_alpha = ld_alpha,
-            discopop_tau = discopop_tau,
             loss_weights = loss_weights,
+            ld_alpha = ld_alpha,
+            f_divergence_type = f_divergence_type,
+            f_alpha_divergence_coef = f_alpha_divergence_coef,
+            label_smoothing = label_smoothing,
+            beta = beta,
+            use_weighting = use_weighting,
+            discopop_tau = discopop_tau,
+            activation_offloading = activation_offloading,
             sync_ref_model = sync_ref_model,
             ref_model_mixup_alpha = ref_model_mixup_alpha,
             ref_model_sync_steps = ref_model_sync_steps,
-            generate_during_eval = generate_during_eval,
-            padding_value = padding_value,**kwargs)
-        super().__init__(**_unsloth_filter_config_init_kwargs(DPOConfig, _unsloth_config_arguments))
+            pad_token = pad_token,**kwargs)
+        super().__init__(**_unsloth_filter_config_init_kwargs(DPOConfig, _unsloth_config_arguments, mirrored_from = __class__))
         self.vllm_sampling_params = vllm_sampling_params
         self.unsloth_num_chunks = unsloth_num_chunks
         if unsloth_grpo_mini_batch is not None:
@@ -996,73 +1002,106 @@ Parameters:
                 )
         self.unsloth_logit_chunk_multiplier = unsloth_logit_chunk_multiplier
         self.max_seq_length = max_seq_length
+        # Unsloth: keep the reentrant checkpoint path
+        if getattr(self, 'gradient_checkpointing', False):
+            _gc_kwargs = getattr(self, 'gradient_checkpointing_kwargs', None) or {}
+            if _gc_kwargs.get('context_fn') is None and not _gc_kwargs.get('debug', False):
+                _gc_kwargs['use_reentrant'] = True
+                self.gradient_checkpointing_kwargs = _gc_kwargs
 
 pass
 
-class _UnslothDPOTrainer(BaseTrainer):
+class _UnslothDPOTrainer(_BaseTrainer):
     """
-    Trainer for Direct Preference Optimization (DPO) method.
+    Trainer for Direct Preference Optimization (DPO) method. This algorithm was initially proposed in the paper [Direct
+    Preference Optimization: Your Language Model is Secretly a Reward Model](https://huggingface.co/papers/2305.18290).
+    This class is a wrapper around the [`~transformers.Trainer`] class and inherits all of its attributes and methods.
 
-    This class is a wrapper around the [`transformers.Trainer`] class and inherits all of its attributes and methods.
+    Example:
+
+    ```python
+    >>> from trl import DPOTrainer
+    >>> from datasets import load_dataset
+
+    >>> dataset = load_dataset("trl-lib/ultrafeedback_binarized", split="train")
+
+    >>> trainer = DPOTrainer(
+    ...     model="Qwen/Qwen2.5-0.5B-Instruct",
+    ...     train_dataset=dataset,
+    ... )
+    >>> trainer.train()
+    ```
 
     Args:
-        model (`Union[str, PreTrainedModel]`):
+        model (`str` or [`~transformers.PreTrainedModel`] or [`~peft.PeftModel`]):
             Model to be trained. Can be either:
 
             - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or a
               path to a *directory* containing model weights saved using
               [`~transformers.PreTrainedModel.save_pretrained`], e.g., `'./my_model_directory/'`. The model is loaded
-              using [`~transformers.AutoModelForCausalLM.from_pretrained`] with the keyword arguments in
-              `args.model_init_kwargs`.
+              using `<ModelArchitecture>.from_pretrained` (where `<ModelArchitecture>` is derived from the model
+              config) with the keyword arguments in `args.model_init_kwargs`. If `dtype` is not specified in
+              `args.model_init_kwargs`, it defaults to `float32`. This differs from
+              [`~transformers.PreTrainedModel.from_pretrained`], where (since Transformers v5) the dtype is inferred
+              from the model config.
             - A [`~transformers.PreTrainedModel`] object. Only causal language models are supported.
-        ref_model ([`PreTrainedModelWrapper`]):
-            Hugging Face transformer model with a casual language modelling head. Used for implicit reward computation
-            and loss. If no reference model is provided, the trainer will create a reference model with the same
-            architecture as the model to be optimized.
+            - A [`~peft.PeftModel`] object. Only causal language models are supported.
+        ref_model ([`~transformers.PreTrainedModel`], *optional*):
+            Reference model used to compute the reference log probabilities.
+
+            - If provided, this model is used directly as the reference policy.
+            - If `None`, the trainer will automatically use the initial policy corresponding to `model`, i.e. the model
+              state before DPO training starts.
         args ([`DPOConfig`], *optional*):
             Configuration for this trainer. If `None`, a default configuration is used.
         data_collator ([`~transformers.DataCollator`], *optional*):
             Function to use to form a batch from a list of elements of the processed `train_dataset` or `eval_dataset`.
-            Will default to [`DataCollatorForPreference`].
+            Will default to [`~trainer.dpo_trainer.DataCollatorForPreference`] if the model is a language model and
+            [`~trainer.dpo_trainer.DataCollatorForVisionPreference`] if the model is a vision-language model. Custom
+            collators must truncate sequences before padding; the trainer does not apply post-collation truncation.
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
-            Dataset to use for training. DPO supports [preference](#preference) type and. The format of the samples can
-            be either:
+            Dataset to use for training. This trainer supports both [language modeling](#language-modeling) type and
+            [prompt-completion](#prompt-completion) type. The format of the samples can be either:
 
             - [Standard](dataset_formats#standard): Each sample contains plain text.
             - [Conversational](dataset_formats#conversational): Each sample contains structured messages (e.g., role
               and content).
-        eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Union[Dataset, IterableDataset]]`):
+
+            When `train_dataset` is an [`~datasets.IterableDataset`] (e.g. a streaming dataset), `max_steps` must be
+            set in the training arguments, since its length cannot be inferred and the total number of training steps
+            is required to bound the training loop and configure the learning rate scheduler.
+        eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`], [`~datasets.DatasetDict`], [`~datasets.IterableDatasetDict`] or `dict[str, Dataset | IterableDataset]`):
             Dataset to use for evaluation. It must meet the same requirements as `train_dataset`.
-        processing_class ([`~transformers.PreTrainedTokenizerBase`], [`~transformers.BaseImageProcessor`], [`~transformers.FeatureExtractionMixin`] or [`~transformers.ProcessorMixin`], *optional*):
-            Processing class used to process the data. If `None`, the processing class is loaded from the model's name
-            with [`~transformers.AutoTokenizer.from_pretrained`].
+        processing_class ([`~transformers.PreTrainedTokenizerBase`] or [`~transformers.ProcessorMixin`], *optional*):
+            Processing class used to process the data. The padding side must be set to "left". If `None`, the
+            processing class is loaded from the model's name with [`~transformers.AutoProcessor.from_pretrained`]. A
+            padding token, `tokenizer.pad_token`, must be set. If the processing class has not set a padding token,
+            `tokenizer.eos_token` will be used as the default.
         compute_metrics (`Callable[[EvalPrediction], dict]`, *optional*):
-            The function that will be used to compute metrics at evaluation. Must take a [`EvalPrediction`] and return
-            a dictionary string to metric values. *Note* When passing TrainingArgs with `batch_eval_metrics` set to
-            `True`, your compute_metrics function must take a boolean `compute_result` argument. This will be triggered
-            after the last eval batch to signal that the function needs to calculate and return the global summary
-            statistics rather than accumulating the batch-level statistics.
+            The function that will be used to compute metrics at evaluation. Must take a
+            [`~transformers.EvalPrediction`] and return a dictionary string to metric values. When passing
+            [`SFTConfig`] with `batch_eval_metrics` set to `True`, your `compute_metrics` function must take a boolean
+            `compute_result` argument. This will be triggered after the last eval batch to signal that the function
+            needs to calculate and return the global summary statistics rather than accumulating the batch-level
+            statistics. The logits it receives are recomputed with an extra forward pass. This is deprecated and will
+            be removed in v2.0.0.
         callbacks (list of [`~transformers.TrainerCallback`], *optional*):
             List of callbacks to customize the training loop. Will add those to the list of default callbacks detailed
             in [here](https://huggingface.co/docs/transformers/main_classes/callback).
 
             If you want to remove one of the default callbacks used, use the [`~transformers.Trainer.remove_callback`]
             method.
-        optimizers (`tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]`, *optional*, defaults to `(None, None)`):
-            A tuple containing the optimizer and the scheduler to use. Will default to an instance of [`AdamW`] on your
-            model and a scheduler given by [`get_linear_schedule_with_warmup`] controlled by `args`.
-        optimizer_cls_and_kwargs (`Tuple[Type[torch.optim.Optimizer], Dict[str, Any]]`, *optional*):
-            A tuple containing the optimizer class and keyword arguments to use. Overrides `optim` and `optim_args` in
-            `args`. Incompatible with the `optimizers` argument.
-        preprocess_logits_for_metrics (`Callable[[torch.Tensor, torch.Tensor], torch.Tensor]`, *optional*):
-            A function that preprocess the logits right before caching them at each evaluation step. Must take two
-            tensors, the logits and the labels, and return the logits once processed as desired. The modifications made
-            by this function will be reflected in the predictions received by `compute_metrics`.
-
-            Note that the labels (second parameter) will be `None` if the dataset does not have them.
+        optimizers (`tuple[torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None]`, *optional*, defaults to `(None, None)`):
+            A tuple containing the optimizer and the scheduler to use. Will default to an instance of `AdamW` on your
+            model and a scheduler given by [`~transformers.get_linear_schedule_with_warmup`] controlled by `args`.
+        quantization_config ([`~transformers.BitsAndBytesConfig`], *optional*):
+            Quantization configuration used when loading the model from a model identifier. Combine with `peft_config`
+            for QLoRA training. Ignored if the model is already instantiated.
         peft_config ([`~peft.PeftConfig`], *optional*):
             PEFT configuration used to wrap the model. If `None`, the model is not wrapped.
     """
+
+    loss_is_scaled_for_ga = False
 
     _tag_names = ["trl", "dpo"]
     _name = "DPO"
@@ -1083,214 +1122,335 @@ class _UnslothDPOTrainer(BaseTrainer):
 
     def __init__(
         self,
-        model: Union[str, nn.Module, PreTrainedModel],
-        ref_model: Optional[Union[PreTrainedModel, nn.Module, str]] = None,
-        args: Optional[DPOConfig] = None,
-        data_collator: Optional[DataCollator] = None,  # type: ignore
-        train_dataset: Optional[Union[Dataset, IterableDataset]] = None,
-        eval_dataset: Optional[Union[Dataset, IterableDataset, dict[str, Union[Dataset, IterableDataset]]]] = None,
-        processing_class: Optional[
-            Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin]
-        ] = None,
-        compute_metrics: Optional[Callable[[EvalLoopOutput], dict]] = None,
-        callbacks: Optional[list[TrainerCallback]] = None,
-        optimizers: tuple[Optional[torch.optim.Optimizer], Optional[torch.optim.lr_scheduler.LambdaLR]] = (None, None),
-        optimizer_cls_and_kwargs: Optional[tuple[type[torch.optim.Optimizer], dict[str, Any]]] = None,
-        preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-        peft_config: Optional["PeftConfig"] = None,
+        model: "str | PreTrainedModel | PeftModel",
+        ref_model: PreTrainedModel | None = None,
+        args: DPOConfig | None = None,
+        data_collator: DataCollator | None = None,
+        train_dataset: Dataset | IterableDataset | None = None,
+        eval_dataset: Dataset
+        | IterableDataset
+        | DatasetDict
+        | IterableDatasetDict
+        | dict[str, Dataset | IterableDataset]
+        | None = None,
+        processing_class: PreTrainedTokenizerBase | ProcessorMixin | None = None,
+        compute_metrics: Callable[[EvalPrediction], dict] | None = None,
+        callbacks: list[TrainerCallback] | None = None,
+        optimizers: tuple[torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None] = (None, None),
+        quantization_config: "BitsAndBytesConfig | None" = None,
+        peft_config: "PeftConfig | None" = None,
     ):
         # Args
         if args is None:
-            model_name = model if isinstance(model, str) else model.config._name_or_path
+            model_name = model if isinstance(model, str) else get_config_model_id(model.config)
             model_name = model_name.split("/")[-1]
             args = DPOConfig(f"{model_name}-DPO")
 
-        # Model and reference model
+        if train_dataset is None:
+            raise ValueError("`train_dataset` is required")
+        elif isinstance(train_dataset, IterableDataset):
+            # IterableDataset requires dispatch_batches=False because Accelerate's dispatch mode may try to concatenate
+            # batches from multiple processes, leading to mismatch errors.
+            if args.accelerator_config.dispatch_batches is True:
+                logger.warning(
+                    "You are using an `IterableDataset` for training with `dispatch_batches=True`. `dispatch_batches` "
+                    "is forced to `False` when using an `IterableDataset`. To remove this warning, unset "
+                    "`dispatch_batches` in `DPOConfig` or set it to `False`."
+                )
+            args.accelerator_config.dispatch_batches = False
+        elif not isinstance(train_dataset, Dataset):
+            raise TypeError(
+                f"`train_dataset` must be a `Dataset` or `IterableDataset`, got `{type(train_dataset).__name__}`."
+            )
+
+        # Model
+        # PEFT initializes the adapter weights randomly, so set_seed must be done before creating the model to ensure
+        # reproducibility.
+        set_seed(args.seed)
         if isinstance(model, str):
-            model = create_model_from_path(model, **args.model_init_kwargs or {})
+            model_init_kwargs = dict(args.model_init_kwargs or {})  # copy to avoid mutating model_init_kwargs
+            if quantization_config is not None:
+                if "quantization_config" in model_init_kwargs:
+                    raise ValueError(
+                        "You set `quantization_config` both as a trainer argument and in `args.model_init_kwargs`. "
+                        "Please set it in only one place, preferably as a trainer argument."
+                    )
+                model_init_kwargs["quantization_config"] = quantization_config
+            # Distributed training requires device_map=None ["auto" fails]
+            if args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
+                model_init_kwargs["device_map"] = None
+            model_init_kwargs.setdefault("trust_remote_code", args.trust_remote_code)
+            model_revision = model_init_kwargs.get("revision")
+            model = create_model_from_path(model, **model_init_kwargs)
         else:
+            model_revision = None
             if args.model_init_kwargs is not None:
                 logger.warning(
                     "You passed `model_init_kwargs` to the `DPOConfig`, but your model is already instantiated. "
                     "The `model_init_kwargs` will be ignored."
                 )
-        model_id = model.config._name_or_path
-        if isinstance(ref_model, str):
-            ref_model = create_model_from_path(ref_model, **args.ref_model_init_kwargs or {})
-        else:
-            if args.ref_model_init_kwargs is not None:
-                logger.warning(
-                    "You passed `ref_model_init_kwargs` to the `DPOConfig`, but your model is already instantiated. "
-                    "The `ref_model_init_kwargs` will be ignored."
+            if quantization_config is not None:
+                raise ValueError(
+                    "You passed `quantization_config` to the trainer, but your model is already instantiated. "
+                    "Quantization can only be applied when the model is loaded from a model identifier (`str`). "
+                    "Either pass the model as a model identifier, or omit `quantization_config`."
                 )
+        # Non-quantized models do not have the `is_loaded_in_{8,4}bit` attributes, whereas quantized models do
+        _is_quantized_model = getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False)
         if ref_model is model:
             raise ValueError(
-                "`model` and `ref_model` cannot be the same object. If you want `ref_model` to be the "
-                "same as `model`, you can simply omit the `ref_model` argument and it will be created for you."
+                "`model` and `ref_model` cannot be the same object. In most cases you should omit `ref_model` and "
+                "we'll initialize it to a copy of `model` for you."
             )
 
         # Processing class
         if processing_class is None:
-            processing_class = AutoProcessor.from_pretrained(model_id)
+            processing_class = AutoProcessor.from_pretrained(
+                get_config_model_id(model.config), revision=model_revision, trust_remote_code=args.trust_remote_code
+            )
 
         # Handle pad token for processors or tokenizers
         if isinstance(processing_class, ProcessorMixin):
-            tokenizer = processing_class.tokenizer
+            self._tokenizer = processing_class.tokenizer
             self._is_vlm = True
         elif isinstance(processing_class, PreTrainedTokenizerBase):
-            tokenizer = processing_class
+            self._tokenizer = processing_class
             self._is_vlm = False
         else:
             raise TypeError("The `processing_class` must be either a `PreTrainedTokenizerBase` or a `ProcessorMixin`")
 
-        # Get the pad token: if not provided, use the one from the processing class or the eos token
-        # if the processing class does not have a pad token.
-        if args.padding_value is not None:  # deprecated, will be removed in 0.26.0.
-            warnings.warn(
-                "The `padding_value` argument is deprecated and will be removed in version 0.26.0. Please use "
-                "`pad_token` (str) instead."
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
+        # The model must agree with the tokenizer on the pad token from construction, so mirror it onto the model
+        # configs.
+        model.config.get_text_config().pad_token_id = self._tokenizer.pad_token_id
+        model.generation_config.pad_token_id = self._tokenizer.pad_token_id
+
+        # PEFT
+        if False:
+            if not is_peft_available():
+                raise ImportError(
+                    "You passed `peft_config` but the `peft` library is not installed. "
+                    "Install it with `pip install trl[peft]`."
+                )
+            if not isinstance(peft_config, PeftConfig):
+                raise TypeError(
+                    f"`peft_config` must be a `peft.PeftConfig` instance (e.g. `peft.LoraConfig`), "
+                    f"got {type(peft_config).__name__}."
+                )
+            if is_peft_model(model):
+                raise ValueError(
+                    "You passed a `PeftModel` instance together with a `peft_config` to the trainer. Please first merge "
+                    "and unload the existing adapter, save the resulting base model, and then pass that base model along "
+                    "with the new `peft_config` to the trainer."
+                )
+            # Create PEFT model
+            # ZeRO-3 + PEFT for non-quantized models:
+            # - PEFT's default autocast_adapter_dtype=True upcasts LoRA adapter params to fp32 even when the base model is bf16.
+            # - ZeRO-3's _allgather_params_coalesced allocates output buffers using the dtype of the first persistent parameter,
+            #   so mixed-dtype persistent_parameters [bf16 base + fp32 LoRA] cause a TypeError on the first optimizer step.
+            # - Passing autocast_adapter_dtype=False keeps adapter params in the base model dtype [bf16], fixing the mismatch.
+            # - This is safe: the fp32 upcast is a QLoRA-specific concern [low-bit quantized base models], not needed for
+            #   non-quantized bf16 training.
+            # - See:
+            #   - TRL issue: https://github.com/huggingface/trl/issues/6089
+            #   - Upstream issue: https://github.com/deepspeedai/DeepSpeed/issues/8072
+            get_peft_model_kwargs = {}
+            if args.deepspeed_plugin is not None and args.deepspeed_plugin.zero_stage == 3 and not _is_quantized_model:
+                get_peft_model_kwargs["autocast_adapter_dtype"] = False
+            model = get_peft_model(model, peft_config, **get_peft_model_kwargs)
+
+        elif is_peft_model(model) and ref_model is None:
+            # If the model is a PEFT model with a pretrained adapter, we need to create a "ref" adapter that is a copy
+            # of the "default" adapter, so that we can use it as the reference model during DPO training. Before PEFT
+            # 0.20.0, only one adapter per model was supported when the LoRA config uses `target_parameters` [see
+            # peft#3340, fixed in peft#3350], so in that case we skip the "ref" adapter and compute the reference log
+            # probs with adapters disabled, i.e. with the base model. The fix only allows adapters targeting the same
+            # parameters, which holds here since the "ref" adapter reuses the "default" config. `target_parameters`
+            # itself was only added in PEFT 0.17.0, so the version check is bounded on both sides.
+            default_config = model.peft_config["default"]
+            if (
+                isinstance(default_config, LoraConfig)
+                and Version("0.17.0") <= Version(peft.__version__) < Version("0.20.0")
+                and default_config.target_parameters
+            ):
+                logger.warning(
+                    "PEFT<0.20.0 can't add a frozen reference adapter alongside one that uses `target_parameters` "
+                    "(peft#3340], so the reference log probs are computed from the base model [adapters disabled]. "
+                    "Upgrade to `peft>=0.20.0` to train against a copy of your adapter instead. If you wrapped the "
+                    "model only to apply LoRA, pass a `peft_config` to the trainer instead; if you wrapped it "
+                    "deliberately (pretrained adapter or custom init), note that the base model matches your adapter "
+                    "only when it's freshly zero-initialized. If it is, this warning is safe to ignore."
+                )
+            else:
+                model.add_adapter("ref", default_config)
+                for name, param in model.named_parameters():
+                    if ".default." in name:
+                        ref_name = name.replace(".default.", ".ref.")
+                        ref_param = model.get_parameter(ref_name)
+                        ref_param.data.copy_(param.data)
+
+        # PEFT + DeepSpeed ZeRO-3 requires reentrant checkpointing. For more details, see
+        # https://github.com/huggingface/trl/issues/2514#issuecomment-2692152703.
+        # Can be removed once https://github.com/deepspeedai/DeepSpeed/pull/8130 is merged and released.
+        if (
+            is_peft_model(model)
+            and args.deepspeed_plugin is not None
+            and args.deepspeed_plugin.zero_stage == 3
+            and args.gradient_checkpointing
+        ):
+            args.gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
+            use_reentrant = args.gradient_checkpointing_kwargs.get("use_reentrant")
+            if use_reentrant is False:
+                logger.warning(
+                    "You are using PEFT with DeepSpeed ZeRO-3 and gradient checkpointing with `use_reentrant=False`. "
+                    "`use_reentrant` is forced to `True` in this configuration to ensure correct training. To remove "
+                    "this warning, unset `use_reentrant` in `gradient_checkpointing_kwargs` or set it to `True`."
+                )
+            args.gradient_checkpointing_kwargs["use_reentrant"] = True
+
+        # When using gradient checkpointing with PEFT, we need to enable input gradients. transformers.Trainer normally
+        # handles this, but a bug currently prevents it; see https://github.com/huggingface/transformers/issues/42489
+        if is_peft_model(model) and args.gradient_checkpointing:
+            model.enable_input_require_grads()
+
+        # When using QLoRA, the PEFT adapter weights are converted to bf16 to follow the recommendations from the
+        # original paper [see https://huggingface.co/papers/2305.14314, paragraph 3]. Normally, this can be done by
+        # passing `autocast_adapter_dtype=False` to `get_peft_model`, but this option is not yet supported for
+        # quantized models. See: https://github.com/huggingface/peft/issues/2889
+        # The DoRA magnitude vector is excluded: unlike LoRA A/B, its optimizer updates can be smaller than bf16 can
+        # represent, silently freezing it, see #7268.
+        if False:
+            for name, param in model.named_parameters():
+                if param.requires_grad and "lora_magnitude_vector" not in name:
+                    param.data = param.data.to(torch.bfloat16)
+
+        # Data collator
+        self.padding_free = args.padding_free
+        if self.padding_free:
+            logger.warning(
+                "`padding_free=True` is temporarily unavailable after a refactor and is currently disabled. Falling "
+                "back to standard padding (`padding_free=False`). This feature is planned to return in a future "
+                "update; for now, please set `padding_free=False` explicitly."
             )
-            self.pad_token_id = args.padding_value
-        else:
-            pad_token = args.pad_token or tokenizer.pad_token or tokenizer.eos_token
-            self.pad_token_id = tokenizer.convert_tokens_to_ids(pad_token)
-            if self.pad_token_id is None:
+            self.padding_free = False
+        dataset_sample = next(iter(train_dataset))
+        self._is_vision_dataset = "image" in dataset_sample or "images" in dataset_sample
+        if self._is_vision_dataset and not self._is_vlm:
+            raise ValueError(
+                "The dataset appears to be vision-related (contains 'image' or 'images' keys), but the provided "
+                "model does not seem to be a vision-language model. Please check your model and dataset."
+            )
+        if self._is_vision_dataset and args.max_length is not None and args.truncation_mode == "keep_end":
+            raise ValueError(
+                "truncation_mode='keep_end' is not supported for vision-language models. Image tokens reside "
+                "inside the prompt portion of the sequence; depending on the example, keep_end may silently "
+                "drop them, causing pixel_values to be forwarded to the model with no corresponding visual "
+                "tokens in input_ids. Use truncation_mode='keep_start' (the default) or set max_length=None."
+            )
+        if self._is_vision_dataset and args.precompute_ref_log_probs:
+            raise ValueError(
+                "`precompute_ref_log_probs=True` is not supported for vision datasets. For vision-language "
+                "models, all data processing is performed on the fly rather than upfront, and running a full "
+                "forward pass of the reference model over the entire dataset is not supported for large "
+                "multimodal models. Set `precompute_ref_log_probs=False`."
+            )
+        if data_collator is None:
+            # Get the pad token: if not provided, use the one from the processing class or the eos token
+            # if the processing class does not have a pad token.
+            pad_token = args.pad_token or self._tokenizer.pad_token or self._tokenizer.eos_token
+            if pad_token not in self._tokenizer.get_vocab():
                 raise ValueError(
                     f"The specified `pad_token` ('{pad_token}') is not found in the vocabulary of the given "
                     f"`processing_class` ({processing_class.__class__.__name__}). Ensure that the `pad_token` exists "
                     "in the vocabulary before using it as a padding token."
                 )
-
-        # PEFT configuration and model wrapping
-        model = self._prepare_peft_model(model, ref_model, peft_config, args)
-
-        if args.generate_during_eval and not (is_wandb_available() or is_comet_available() or is_mlflow_available()):
-            raise ValueError(
-                "`generate_during_eval=True` requires Weights and Biases, MLFlow or Comet to be installed."
-                " Please install `wandb`, `mlflow` or `comet-ml` to resolve."
-            )
-
-        self.is_encoder_decoder = model.config.is_encoder_decoder
-        self.is_vision_model = model.config.model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES.keys()
-        self.is_peft_model = is_peft_available() and isinstance(model, PeftModel)
-        self.model_adapter_name = args.model_adapter_name
-        self.ref_adapter_name = args.ref_adapter_name
-        self.reference_free = args.reference_free
-
-        if ref_model:
-            self.ref_model = ref_model
-        elif self.is_peft_model or args.precompute_ref_log_probs:
-            # The `model` with adapters turned off will be used as the reference model
-            self.ref_model = None
-        else:
-            self.ref_model = create_reference_model(model)
-
-        # Disable dropout in the model and reference model
-        if args.disable_dropout:
-            disable_dropout_in_model(model)
-            if self.ref_model is not None:
-                disable_dropout_in_model(self.ref_model)
-
-        # Liger kernel
-        if args.use_liger_loss:
-            if not is_liger_kernel_available():
-                raise ImportError(
-                    "You set `use_liger_loss=True` but the liger kernel is not available. "
-                    "Please install liger-kernel first: `pip install liger-kernel`"
+            self._tokenizer.pad_token = pad_token
+            # The model must agree with the tokenizer on the pad token from construction, so mirror it onto the model
+            # configs.
+            model.config.get_text_config().pad_token_id = self._tokenizer.pad_token_id
+            model.generation_config.pad_token_id = self._tokenizer.pad_token_id
+            if self._is_vision_dataset:
+                data_collator = DataCollatorForVisionPreference(
+                    processor=processing_class,
+                    max_length=args.max_length,
+                    pad_to_multiple_of=args.pad_to_multiple_of,
                 )
-            if args.loss_type not in ["sigmoid", "apo_zero", "apo_down", "sppo_hard", "nca_pair"]:
-                raise ValueError(
-                    "You set `use_liger_loss=True` but the loss type is not from `[sigmoid, apo_zero, apo_down, sppo_hard, nca_pair`. "
-                    "Please set `loss_type='[sigmoid | apo_zero | apo_down | sppo_hard | nca_pair]'` to use the liger kernel."
-                )
-            self.dpo_loss_fn = LigerFusedLinearDPOLoss(
-                ignore_index=args.label_pad_token_id,
-                beta=args.beta,
-                use_ref_model=not args.reference_free,
-                average_log_prob=False,
-                loss_type=args.loss_type,
-            )
-        # The trainer estimates the number of FLOPs [floating-point operations] using the number of elements in the
-        # input tensor associated with the key "input_ids". However, in DPO, the sampled data does not include the
-        # "input_ids" key. Instead, the available keys are "prompt_input_ids", "chosen_input_ids", and
-        # "rejected_input_ids". As a result, the trainer issues the warning: "Could not estimate the number of tokens
-        # of the input, floating-point operations will not be computed." To suppress this warning, we set the
-        # "estimate_tokens" key in the model's "warnings_issued" dictionary to True. This acts as a flag to indicate
-        # that the warning has already been issued.
-        model.warnings_issued["estimate_tokens"] = True
-
-        # Data collator
-        if data_collator is None:
-            data_collator = DataCollatorForPreference(pad_token_id=self.pad_token_id)
-
-        self.generate_during_eval = args.generate_during_eval
-        self.label_pad_token_id = args.label_pad_token_id
-        self.max_prompt_length = args.max_prompt_length
-        self.max_completion_length = args.max_completion_length
-        self.max_length = args.max_length
-        self.truncation_mode = args.truncation_mode
-        self.precompute_ref_log_probs = args.precompute_ref_log_probs
-        self.use_logits_to_keep = args.use_logits_to_keep
-
-        if args.padding_free:
-            if model.config._attn_implementation != "flash_attention_2":
-                logger.warning(
-                    "Padding-free training is enabled, but the attention implementation is not set to "
-                    "'flash_attention_2'. Padding-free training flattens batches into a single sequence, and "
-                    "'flash_attention_2' is the only known attention mechanism that reliably supports this. Using "
-                    "other implementations may lead to unexpected behavior. To ensure compatibility, set "
-                    "`attn_implementation='flash_attention_2'` in the model configuration, or verify that your "
-                    "attention mechanism can handle flattened sequences."
-                )
-        self.padding_free = args.padding_free
-
-        # Since ref_logs are precomputed on the first call to get_train/eval_dataloader
-        # keep track of first called to avoid computation of future calls
-        self._precomputed_train_ref_log_probs = False
-        self._precomputed_eval_ref_log_probs = False
-
-        self.beta = args.beta
-        self.label_smoothing = args.label_smoothing
-        self.loss_type = args.loss_type if isinstance(args.loss_type, list) else [args.loss_type]
-        self.loss_weights = args.loss_weights
-        self.aux_loss_enabled = getattr(model.config, "output_router_logits", False)
-        self.use_weighting = args.use_weighting
-        self.aux_loss_coef = getattr(model.config, "router_aux_loss_coef", 0.0)
-        if self.aux_loss_enabled and self.aux_loss_coef == 0.0:
-            logger.warning(
-                "You set `output_router_logits` to `True` in the model config, but `router_aux_loss_coef` is set to "
-                "`0.0`, meaning the auxiliary loss will not be used. Either set `router_aux_loss_coef` to a value "
-                "greater than `0.0`, or set `output_router_logits` to `False` if you don't want to use the auxiliary "
-                "loss.",
-            )
-        for loss_type in self.loss_type:
-            if (
-                loss_type in ["hinge", "ipo", "bco_pair", "sppo_hard", "nca_pair", "apo_zero", "apo_down"]
-                and args.label_smoothing > 0
-            ):
-                logger.warning(
-                    f"You are using the {loss_type} loss type that does not support label smoothing. The "
-                    "`label_smoothing` parameter will be ignored. Set `label_smoothing` to `0.0` to remove this "
-                    "warning.",
-                )
-            if loss_type == "kto_pair":
-                raise ValueError("Support for kto_pair has been removed in DPOTrainer. Please use KTOTrainer.")
-
-        self._stored_metrics = defaultdict(lambda: defaultdict(list))
-        self.f_divergence_type = args.f_divergence_type
-        self.f_divergence_params = {FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY: args.f_alpha_divergence_coef}
-        self.dataset_num_proc = args.dataset_num_proc
-
-        # Dataset preparation
-        train_dataset = self._prepare_dataset(train_dataset, processing_class, args, "train")
-        if eval_dataset is not None:
-            if isinstance(eval_dataset, dict):
-                eval_dataset = {
-                    key: self._prepare_dataset(dataset, processing_class, args, key)
-                    for key, dataset in eval_dataset.items()
-                }
             else:
-                eval_dataset = self._prepare_dataset(eval_dataset, processing_class, args, "eval")
+                data_collator = DataCollatorForPreference(
+                    pad_token_id=self._tokenizer.pad_token_id,
+                    max_length=args.max_length,
+                    truncation_mode=args.truncation_mode,
+                    pad_to_multiple_of=args.pad_to_multiple_of,
+                )
+
+        # Training arguments
+        self.beta = args.beta
+        self.precompute_ref_logps = args.precompute_ref_log_probs
+        self.loss_types = args.loss_type  # args.loss_type is already a list
+        self.loss_weights = args.loss_weights or [1.0] * len(self.loss_types)
+        self.ld_alpha = args.ld_alpha
+        self.f_divergence_type = args.f_divergence_type
+        self.f_alpha_divergence_coef = args.f_alpha_divergence_coef
+        # The f-DPO reparameterization leaves a β·log Z[x] term that only cancels in the chosen-rejected reward
+        # difference, so the other losses have no valid f-divergence generalization.
+        f_divergence_loss_types = {"sigmoid", "sigmoid_norm", "hinge", "ipo", "exo_pair", "robust", "discopop", "sft"}
+        if self.f_divergence_type != "reverse_kl" and not set(self.loss_types) <= f_divergence_loss_types:
+            raise ValueError(
+                f"`f_divergence_type='{self.f_divergence_type}'` is only supported for the following loss types: "
+                f"{sorted(f_divergence_loss_types)}. You provided {self.loss_types}. Use the default "
+                "`f_divergence_type='reverse_kl'` with these losses."
+            )
+        self.label_smoothing = args.label_smoothing
+        self.use_weighting = args.use_weighting
+        if self.use_weighting and any(loss_type in {"aot", "aot_unpaired"} for loss_type in self.loss_types):
+            raise NotImplementedError(
+                "WPO-style weighting is not implemented for 'aot' or 'aot_unpaired' because those losses sort "
+                "samples, which would misalign per-pair weights."
+            )
+        if "robust" in self.loss_types and not (0.0 <= self.label_smoothing < 0.5):
+            logger.warning(
+                "The `label_smoothing` parameter should lie in [0.0, 0.5) for the 'robust' loss. You provided "
+                f"{self.label_smoothing}."
+            )
+        if "exo_pair" in self.loss_types and self.label_smoothing == 0.0:
+            raise ValueError(
+                "Label smoothing must be greater than 0.0 when using 'exo_pair' loss. The EXO paper recommends a "
+                "value of 1e-3."
+            )
+
+        if is_peft_model(model) and isinstance(model.get_output_embeddings(), BaseTunerLayer):
+            # The log-probabilities are computed by multiplying the hidden states by `lm_head.weight` directly, so an
+            # adapter on the LM head would be ignored and never trained.
+            raise ValueError(
+                "Applying a PEFT adapter to `lm_head` is not supported: the log-probabilities are computed from "
+                "`lm_head.weight` directly, so the adapter would never be trained. Remove `'lm_head'` from your "
+                "`target_modules`."
+            )
+
+        # Dataset
+        # Skip dataset preparation if it's a VLM, where preprocessing [e.g., image-to-pixel conversion] is too costly
+        # and done on the fly instead.
+        skip_prepare_dataset = self._is_vision_dataset
+        if not skip_prepare_dataset:
+            train_dataset = self._prepare_dataset(train_dataset, processing_class, args, "train")
+            if eval_dataset is not None:
+                if isinstance(eval_dataset, dict):
+                    eval_dataset = {
+                        key: self._prepare_dataset(dataset, processing_class, args, key)
+                        for key, dataset in eval_dataset.items()
+                    }
+                else:
+                    eval_dataset = self._prepare_dataset(eval_dataset, processing_class, args, "eval")
+
+        # Transformers explicitly set use_reentrant=True in the past to silence a PyTorch warning, but the default was
+        # never updated once PyTorch switched to recommending use_reentrant=False. Until that change lands upstream
+        # [see https://github.com/huggingface/transformers/pull/43203] and is released [most likely in 5.0.0], we
+        # default to the recommended non-reentrant behavior here, while preserving any user-provided value.
+        if args.gradient_checkpointing and Version(transformers.__version__) < Version("5.0.0"):
+            args.gradient_checkpointing_kwargs = args.gradient_checkpointing_kwargs or {}
+            args.gradient_checkpointing_kwargs.setdefault("use_reentrant", False)
 
         super().__init__(
             model=model,
@@ -1302,41 +1462,111 @@ class _UnslothDPOTrainer(BaseTrainer):
             compute_metrics=compute_metrics,
             callbacks=callbacks,
             optimizers=optimizers,
-            optimizer_cls_and_kwargs=optimizer_cls_and_kwargs,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
 
-        # Gradient accumulation requires scaled loss. Normally, loss scaling in the parent class depends on whether the
-        # model accepts loss-related kwargs. Since we compute our own loss, this check is irrelevant. We set
-        # self.model_accepts_loss_kwargs to False to enable scaling.
-        self.model_accepts_loss_kwargs = False
-
-        # Add tags for models that have been loaded with the correct transformers version
-        if hasattr(self.model, "add_model_tags"):
-            self.model.add_model_tags(self._tag_names)
-
-        if not hasattr(self, "accelerator"):
-            raise AttributeError(
-                "Your `Trainer` does not have an `accelerator` object. Consider upgrading `transformers`."
+        # With several GPUs visible and no distributed launcher, `Trainer` wraps the model in `nn.DataParallel`, whose
+        # replicas would all run the forward bound to the original model. Checked after `Trainer.__init__`, which sets
+        # `n_gpu` to 1 for a model split across devices with `device_map`.
+        if args.n_gpu > 1:
+            raise ValueError(
+                f"{type(self).__name__} does not support `nn.DataParallel`, which `Trainer` uses when several GPUs are "
+                "visible to a single process. Launch the script with `accelerate launch` or `torchrun`, or make a "
+                "single GPU visible with `CUDA_VISIBLE_DEVICES`."
             )
 
-        # Deepspeed Zero-3 does not support precompute_ref_log_probs
-        if self.is_deepspeed_enabled:
-            if self.accelerator.state.deepspeed_plugin.zero_stage == 3 and self.precompute_ref_log_probs:
-                raise ValueError(
-                    "You cannot use `precompute_ref_log_probs=True` with Deepspeed ZeRO-3. Please set `precompute_ref_log_probs=False`."
-                )
-
-        if self.ref_model is None:
-            if not (self.is_peft_model or self.precompute_ref_log_probs):
-                raise ValueError(
-                    "No reference model and model is not a Peft model. Try setting `precompute_ref_log_probs=True`"
-                )
-            if args.sync_ref_model:
-                raise ValueError(
-                    "You currently cannot use `ref_model=None` with TR-DPO method. Please provide `ref_model`."
-                )
+        # Initialize activation offloading context
+        if self.args.activation_offloading:
+            self.maybe_activation_offload_context = get_act_offloading_ctx_manager(model=self.model)
         else:
+            self.maybe_activation_offload_context = contextlib.nullcontext()
+
+        # MoE load-balancing auxiliary loss. `output_router_logits` in the config means the model returns its router
+        # logits; `router_aux_loss_coef` is the architecture's own coefficient, 0.0 when the config declares none.
+        text_config = model.config.get_text_config()
+        coef = args.router_aux_loss_coef
+        self.router_aux_loss_coef = getattr(text_config, "router_aux_loss_coef", 0.0) if coef is None else coef
+        if coef and not hasattr(text_config, "output_router_logits"):
+            raise ValueError(
+                f"`router_aux_loss_coef` is set to {coef} but {type(model).__name__} is not a Mixture-of-Experts model "
+                f"that returns its router logits, so there is no auxiliary loss to weight."
+            )
+        self.aux_loss_enabled = hasattr(text_config, "output_router_logits") and self.router_aux_loss_coef != 0.0
+
+        # Reference model
+        if ref_model is None:
+            if is_peft_model(self.model) or (args.precompute_ref_log_probs and not self.is_fsdp_enabled):
+                # If PEFT is used, the reference model is not needed since the adapter can be disabled to revert to the
+                # initial model. If precompute_ref_log_probs is True, the reference model does not need to be kept in
+                # memory during training. Under FSDP, the policy isn't sharded until `train`, so the precompute still
+                # loads a reference model, freed once it is done.
+                self.ref_model = None
+            else:
+                ref_model_init_kwargs = dict(args.model_init_kwargs or {})  # copy to avoid mutating model_init_kwargs
+                if quantization_config is not None:
+                    ref_model_init_kwargs["quantization_config"] = quantization_config
+                # Distributed training requires device_map=None ["auto" fails]
+                if self.args.distributed_state.distributed_type in ["MULTI_GPU", "DEEPSPEED"]:
+                    ref_model_init_kwargs["device_map"] = None
+                ref_model_init_kwargs.setdefault("trust_remote_code", args.trust_remote_code)
+                ref_model_path = get_config_model_id(self.model.config)
+                self.ref_model = create_model_from_path(ref_model_path, **ref_model_init_kwargs)
+        else:
+            self.ref_model = ref_model
+
+        # Disable dropout in the models
+        if args.disable_dropout:
+            disable_dropout_in_model(model)
+            if self.ref_model is not None:
+                disable_dropout_in_model(self.ref_model)
+
+        # Liger's fused linear cross-entropy replaces `model.forward` when training starts, which would drop the fused
+        # LM head, so only its layer kernels are applied
+        if args.use_liger_kernel:
+            warnings.warn(
+                "`use_liger_kernel=True` is deprecated and will be removed in v2.0.0. Use the Hub kernels instead, "
+                'with `model_init_kwargs={"use_kernels": True}`.',
+                FutureWarning,
+                stacklevel=2,
+            )
+            liger_kernel_config = args.liger_kernel_config or {}
+            if liger_kernel_config.get("fused_linear_cross_entropy"):
+                raise ValueError(
+                    '`liger_kernel_config={"fused_linear_cross_entropy": True}` is not supported: it replaces the '
+                    "model's forward, which this trainer patches with a fused LM head."
+                )
+            args.liger_kernel_config = {**liger_kernel_config, "fused_linear_cross_entropy": False}
+
+        # Compute the per-token log-probabilities in chunks, without materializing the full logits
+        # `mean_logits` and `is_top1` feed the `logits/*` and `mean_token_accuracy` metrics, `log_sum_sq_probs` the WPO
+        # weights
+        outputs = ("log_probs", "entropy", "mean_logits", "is_top1")
+        if self.use_weighting:
+            outputs += ("log_sum_sq_probs",)
+        add_fused_lm_head(self.model.get_base_model() if is_peft_model(self.model) else self.model, outputs=outputs)
+        if self.ref_model is not None:
+            add_fused_lm_head(self.ref_model)
+
+        # Initialize the metrics
+        self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+        self._total_train_tokens = 0
+
+        # Tensor parallel ranks are given the same batch, so a token count gathered across all processes repeats
+        # every token once per rank in the group. Context and sequence parallelism shard the batch before the loss is
+        # computed, so they need no such correction. `ParallelismConfig.tp_size` requires accelerate 1.10.0.
+        if Version(accelerate.__version__) >= Version("1.10.0") and self.accelerator.parallelism_config is not None:
+            self._tp_size = self.accelerator.parallelism_config.tp_size
+        else:
+            self._tp_size = 1
+
+        # Add tags to the model
+        self.model.add_model_tags(self._tag_names)
+
+        # Hash before the reference model is sharded, since DTensor parameters can't be hashed
+        self._precompute_model_hash = (
+            hash_module(self.ref_model or self.model) if args.precompute_ref_log_probs else None
+        )
+
+        if self.ref_model is not None:
             if self.is_deepspeed_enabled:
                 self.ref_model = prepare_deepspeed(self.ref_model, self.accelerator)
             elif self.is_fsdp_enabled:
@@ -1345,1486 +1575,735 @@ class _UnslothDPOTrainer(BaseTrainer):
                 self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
 
         if args.sync_ref_model:
-            if self.precompute_ref_log_probs:
-                raise ValueError(
-                    "You cannot use `precompute_ref_log_probs=True` with TR-DPO method. Please set `precompute_ref_log_probs=False`."
+            if is_peft_model(self.model):
+                raise NotImplementedError(
+                    "You passed `sync_ref_model=True` while using a PEFT model, which is currently not supported. "
+                    "With PEFT, DPOTrainer does not keep a separate reference model in memory; instead, it recovers "
+                    "reference behavior by temporarily disabling the adapter. As a result, there is no standalone "
+                    "`ref_model` instance to synchronize. Use `sync_ref_model=False`, or opt for full fine-tuning if "
+                    "you need a synced reference model. If you need `sync_ref_model` to work with PEFT, please open a "
+                    "feature request at https://github.com/huggingface/trl/issues."
                 )
-
+            if args.precompute_ref_log_probs:
+                raise ValueError(
+                    "You cannot use `sync_ref_model=True` together with `precompute_ref_log_probs=True`. "
+                    "`precompute_ref_log_probs=True` assumes a fixed reference model, but with `sync_ref_model=True` "
+                    "the reference model is periodically updated during training, making any precomputed reference "
+                    "log-probs stale. Set `precompute_ref_log_probs=False` or disable `sync_ref_model`."
+                )
             self.add_callback(SyncRefModelCallback(ref_model=self.ref_model, accelerator=self.accelerator))
 
-        if "bco_pair" in self.loss_type:
-            self.running = RunningMoments(self.accelerator)
-
-    @property
-    def padding_value(self):
-        warnings.warn(
-            "The `padding_value` property is deprecated and will be removed in version 0.26.0. Please use "
-            "`pad_token_id` instead.",
-        )
-        return self.pad_token_id
-
-    @padding_value.setter
-    def padding_value(self, value):
-        warnings.warn(
-            "The `padding_value` property is deprecated and will be removed in version 0.26.0. Please use "
-            "`pad_token_id` instead.",
-        )
-        self.pad_token_id = value
-
-    def _prepare_peft_model(
-        self, model: PreTrainedModel, ref_model: PreTrainedModel, peft_config: Any, args: DPOConfig
-    ) -> PreTrainedModel:
-        """Prepares a model for PEFT training."""
-        # Initialize this variable to False. This helps tracking the case when `peft_module_casting_to_bf16`
-        # has been called in order to properly call autocast if needed.
-        self._peft_has_been_casted_to_bf16 = False
-
-        if not is_peft_available() and peft_config is not None:
-            raise ValueError(
-                "PEFT is not installed and you passed a `peft_config` in the trainer's kwargs, please install it to use the PEFT models"
+        # Reference forwards during precompute reuse a single DeepSpeed inference engine [see `_precompute_ref_logps`].
+        self._precompute_engine = None
+        if args.precompute_ref_log_probs:
+            self.train_dataset = self._precompute_ref_logps(
+                self.train_dataset,
+                "train",
+                self.args.precompute_ref_batch_size or self.args.per_device_train_batch_size,
             )
-        elif is_peft_available() and peft_config is not None:
-            # if model is a peft model and we have a peft_config, we merge and unload it first
-            if isinstance(model, PeftModel):
-                model = model.merge_and_unload()
-
-            if ref_model is not None and not args.force_use_ref_model:
-                raise ValueError(
-                    "You passed both a ref_model and a peft_config. For training PEFT adapters with DPO there is no need to pass a reference"
-                    " model. Please pass `ref_model=None` in case you want to train PEFT adapters, or pass a ref_model with `force_use_ref_model=True` in DPOTrainer's init."
-                    " if you want to use a different ref_model."
-                )
-
-            if getattr(model, "is_loaded_in_8bit", False) or getattr(model, "is_loaded_in_4bit", False):
-                _support_gc_kwargs = hasattr(
-                    args, "gradient_checkpointing_kwargs"
-                ) and "gradient_checkpointing_kwargs" in list(
-                    inspect.signature(prepare_model_for_kbit_training).parameters
-                )
-
-                prepare_model_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
-
-                if _support_gc_kwargs:
-                    prepare_model_kwargs["gradient_checkpointing_kwargs"] = args.gradient_checkpointing_kwargs
-
-                model = prepare_model_for_kbit_training(model, **prepare_model_kwargs)
-
-            else:
-                model = self._prepare_gradient_checkpointing(model, args)
-
-            # get peft model with the given config
-            model = get_peft_model(model, peft_config)
-            if args.bf16 and getattr(model, "is_loaded_in_4bit", False):
-                peft_module_casting_to_bf16(model)
-                # If args.bf16 we need to explicitly call `generate` with torch amp autocast context manager
-                self._peft_has_been_casted_to_bf16 = True
-
-        else:
-            model = self._prepare_gradient_checkpointing(model, args)
-
-        return model
-
-    def _prepare_gradient_checkpointing(self, model: PreTrainedModel, args: DPOConfig):
-        """Prepare the gradienting checkpointing for the model."""
-        # For models that use gradient_checkpointing, we need to attach a hook that enables input
-        # to explicitly have `requires_grad=True`, otherwise training will either silently
-        # fail or completely fail.
-        if args.gradient_checkpointing:
-            # For backward compatibility with older versions of transformers
-            if hasattr(model, "enable_input_require_grads"):
-                model.enable_input_require_grads()
-            else:
-
-                def make_inputs_require_grad(module, input, output):
-                    output.requires_grad_(True)
-
-                model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
-
-        return model
+            if self.eval_dataset is not None:
+                if isinstance(self.eval_dataset, dict):
+                    self.eval_dataset = {
+                        name: self._precompute_ref_logps(
+                            dataset, name, self.args.precompute_ref_batch_size or self.args.per_device_eval_batch_size
+                        )
+                        for name, dataset in self.eval_dataset.items()
+                    }
+                else:
+                    self.eval_dataset = self._precompute_ref_logps(
+                        self.eval_dataset,
+                        "eval",
+                        self.args.precompute_ref_batch_size or self.args.per_device_eval_batch_size,
+                    )
+            if self.is_fsdp_enabled and ref_model is None:
+                self.ref_model = None
 
     def _prepare_dataset(
         self,
-        dataset: Union[Dataset, IterableDataset],
-        processing_class: Union[PreTrainedTokenizerBase, BaseImageProcessor, FeatureExtractionMixin, ProcessorMixin],
+        dataset: Dataset | IterableDataset,
+        processing_class: PreTrainedTokenizerBase | ProcessorMixin,
         args: DPOConfig,
         dataset_name: str,
-    ) -> Union[Dataset, IterableDataset]:
+    ) -> Dataset | IterableDataset:
         # Build the kwargs for the `map` function
         map_kwargs = {}
-        if isinstance(dataset, Dataset):  # IterableDataset does not support num_proc nor writer_batch_size
+        if isinstance(dataset, Dataset):  # IterableDataset does not support num_proc
             map_kwargs["num_proc"] = args.dataset_num_proc
-            map_kwargs["writer_batch_size"] = 10
 
-        with PartialState().main_process_first():
-            # Extract prompt if needed
-            if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
-                map_kwargs["desc"] = f"Extracting prompt in {dataset_name} dataset"
-            dataset = dataset.map(maybe_extract_prompt, **map_kwargs)
+        with global_then_local_main_first():
+            # Extract the prompt if needed
+            first_example = next(iter(dataset))
+            if "prompt" not in first_example:
+                if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
+                    map_kwargs["desc"] = f"Extracting prompt from {dataset_name} dataset"
+                dataset = dataset.map(extract_prompt, **map_kwargs)
 
-            # Apply the chat template if needed
-            if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
-                map_kwargs["desc"] = f"Applying chat template to {dataset_name} dataset"
-            dataset = dataset.map(
-                maybe_apply_chat_template, fn_kwargs={"tokenizer": processing_class, "tools": args.tools}, **map_kwargs
-            )
+            # Add EOS token if needed: non-conversational only
+            first_example = next(iter(dataset))
+            if not is_conversational(first_example):
+                if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
+                    map_kwargs["desc"] = f"Adding EOS to {dataset_name} dataset"
+
+                def add_eos(example, eos_token):
+                    if not example["chosen"].endswith(eos_token):
+                        example["chosen"] = example["chosen"] + eos_token
+                    if not example["rejected"].endswith(eos_token):
+                        example["rejected"] = example["rejected"] + eos_token
+                    return example
+
+                dataset = dataset.map(add_eos, fn_kwargs={"eos_token": self._tokenizer.eos_token}, **map_kwargs)
 
             # Tokenize the dataset
             if isinstance(dataset, Dataset):  # `IterableDataset.map` does not support `desc`
                 map_kwargs["desc"] = f"Tokenizing {dataset_name} dataset"
-            if self.is_vision_model:
-                map_kwargs.pop("num_proc", None)
+
+            def tokenize_fn(example, processing_class):
+                tools = example.get("tools")
+                tools = json.loads(tools) if isinstance(tools, str) else tools
+                apply_chat_template_kwargs = {"tools": tools, **example.get("chat_template_kwargs", {})}
+                output = {}
+                if is_conversational(example):
+                    prompt_ids = _tokenize(
+                        processing_class,
+                        example["prompt"],
+                        add_generation_prompt=True,
+                        **apply_chat_template_kwargs,
+                    )["input_ids"]
+                    prompt_chosen_ids = _tokenize(
+                        processing_class,
+                        example["prompt"] + example["chosen"],
+                        **apply_chat_template_kwargs,
+                    )["input_ids"]
+                    prompt_rejected_ids = _tokenize(
+                        processing_class,
+                        example["prompt"] + example["rejected"],
+                        **apply_chat_template_kwargs,
+                    )["input_ids"]
+                else:
+                    prompt_ids = _tokenize(processing_class, example["prompt"])["input_ids"]
+                    prompt_chosen_ids = _tokenize(processing_class, example["prompt"] + example["chosen"])["input_ids"]
+                    prompt_rejected_ids = _tokenize(processing_class, example["prompt"] + example["rejected"])[
+                        "input_ids"
+                    ]
+
+                # The completion starts where the tokenized prompt and prompt+completion diverge, which is not always
+                # after the prompt (see `common_prefix_length`)
+                prompt_len = min(
+                    common_prefix_length(prompt_ids, prompt_chosen_ids),
+                    common_prefix_length(prompt_ids, prompt_rejected_ids),
+                )
+                if prompt_len < len(prompt_ids):
+                    logger.warning_once(
+                        "The tokenized prompt is not a prefix of the tokenized prompt+completion, usually because the "
+                        "chat template renders the prompt alone differently or because tokens merge across the "
+                        "boundary. The completion starts where they diverge, and this end of the prompt is left out "
+                        "of the training sequence: "
+                        f"{processing_class.decode(prompt_ids[prompt_len:])!r}"
+                        ". The model is trained on a context that differs from the one it sees at inference. To avoid "
+                        "it, use a chat template that renders the prompt the same way in both cases, or end the "
+                        "prompt on a token boundary. This warning is shown once, but it likely applies to every "
+                        "example in the dataset."
+                    )
+
+                output["prompt_ids"] = prompt_ids[:prompt_len]
+                output["chosen_ids"] = prompt_chosen_ids[prompt_len:]
+                output["rejected_ids"] = prompt_rejected_ids[prompt_len:]
+                return output
 
             dataset = dataset.map(
-                self.tokenize_row if not self.is_vision_model else dpo_trainer_vision_process_row,
-                remove_columns=["chosen", "rejected"],
-                fn_kwargs={
-                    "processing_class": processing_class,
-                    "max_prompt_length": args.max_prompt_length,
-                    "max_completion_length": args.max_completion_length,
-                    # for enc-dec, we add the special tokens ([bos_token] + prompt + [eos_token]; completion + [eos_token])
-                    "add_special_tokens": False,
-                },
+                tokenize_fn,
+                fn_kwargs={"processing_class": processing_class},
                 **map_kwargs,
             )
 
+            # Drop examples whose prompt alone fills `max_length`: with `keep_start` truncation the collator would
+            # remove every completion token, leaving no learning signal. `keep_end` keeps the completion end, so
+            # nothing is dropped there.
+            if args.max_length is not None and args.truncation_mode == "keep_start":
+                if isinstance(dataset, Dataset):  # `IterableDataset.filter` does not support `desc`
+                    map_kwargs["desc"] = f"Dropping fully truncated examples from {dataset_name} dataset"
+                dataset = dataset.filter(lambda example: len(example["prompt_ids"]) < args.max_length, **map_kwargs)
+
         return dataset
-
-    @staticmethod
-    def tokenize_row(
-        features: dict[str, str],
-        processing_class: PreTrainedTokenizerBase,
-        max_prompt_length: Optional[int] = None,
-        max_completion_length: Optional[int] = None,
-        add_special_tokens: bool = True,
-    ) -> dict[str, list[int]]:
-        """
-        Tokenize a row of the dataset.
-
-        Args:
-            features (`dict[str, str]`):
-                Row of the dataset, should contain the keys `"prompt"`, `"chosen"`, and `"rejected"`.
-            processing_class ([`~transformers.PreTrainedTokenizerBase`]):
-                Processing class used to process the data.
-            max_prompt_length (`int` or `None`):
-                Maximum length of the prompt sequence. If `None`, the prompt sequence is not truncated.
-            max_completion_length (`int` or `None`):
-                Maximum length of the completion sequences. If `None`, the completion sequences are not truncated.
-            add_special_tokens (`bool`):
-                Whether to add special tokens to the sequences. Typically used for encoder-decoder models. If `True`,
-                the prompt sequence will have a bos token prepended and an eos token appended. In any case, the
-                completion sequences will have an eos token appended.
-
-        Returns:
-            `dict[str, list[int]]`:
-                Tokenized sequences with the keys `"prompt_input_ids"`, `"chosen_input_ids"`, and
-                `"rejected_input_ids".
-
-        Example:
-        ```python
-        >>> from transformers import GPT2Tokenizer
-
-        >>> tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-        >>> features = {"prompt": "The sky is", "chosen": " blue", "rejected": " green"}
-        >>> DPOTrainer.tokenize_row(
-        ...     features, tokenizer, max_prompt_length=3, max_completion_length=3, add_special_tokens=False
-        ... )
-        {'prompt_input_ids': [464, 6766, 318], 'chosen_input_ids': [4171, 50256], 'rejected_input_ids': [4077, 50256]}
-        ```
-        """
-        tokenizer = processing_class  # the processing class is a tokenizer
-        prompt_input_ids = tokenizer(features["prompt"], add_special_tokens=False)["input_ids"]
-        chosen_input_ids = tokenizer(features["chosen"], add_special_tokens=False)["input_ids"]
-        rejected_input_ids = tokenizer(features["rejected"], add_special_tokens=False)["input_ids"]
-
-        # Add special tokens (typically for encoder-decoder models)
-        if add_special_tokens:
-            if tokenizer.bos_token_id is not None:
-                prompt_input_ids = [tokenizer.bos_token_id] + prompt_input_ids
-            if tokenizer.eos_token_id is not None:
-                prompt_input_ids = prompt_input_ids + [tokenizer.eos_token_id]
-        chosen_input_ids = chosen_input_ids + [tokenizer.eos_token_id]
-        rejected_input_ids = rejected_input_ids + [tokenizer.eos_token_id]
-
-        # Truncate prompt and completion sequences
-        if max_prompt_length is not None:
-            prompt_input_ids = prompt_input_ids[-max_prompt_length:]
-        if max_completion_length is not None:
-            chosen_input_ids = chosen_input_ids[:max_completion_length]
-            rejected_input_ids = rejected_input_ids[:max_completion_length]
-
-        return {
-            "prompt_input_ids": prompt_input_ids,
-            "chosen_input_ids": chosen_input_ids,
-            "rejected_input_ids": rejected_input_ids,
-        }
-
-    @staticmethod
-    def process_row(
-        features: dict[str, str],
-        processing_class: PreTrainedTokenizerBase,
-        max_prompt_length: Optional[int] = None,
-        max_completion_length: Optional[int] = None,
-        add_special_tokens: bool = True,
-    ) -> dict[str, list[int]]:
-        """
-        Same as `tokenize_row` but for vision models. Please refer to `tokenize_row` for more information.
-        """
-        processor, tokenizer = processing_class, processing_class.tokenizer  # the processing class is a processor
-        processed_features = processor(images=features["images"], text=features["prompt"], add_special_tokens=False)
-
-        prompt_input_ids = processed_features["input_ids"][0]
-        pixel_values = processed_features["pixel_values"][0]
-        chosen_input_ids = tokenizer(features["chosen"], add_special_tokens=False)["input_ids"]
-        rejected_input_ids = tokenizer(features["rejected"], add_special_tokens=False)["input_ids"]
-
-        # Add special tokens (typically for encoder-decoder models)
-        if add_special_tokens:
-            if tokenizer.bos_token_id is not None:
-                prompt_input_ids = [tokenizer.bos_token_id] + prompt_input_ids
-            if tokenizer.eos_token_id is not None:
-                prompt_input_ids = prompt_input_ids + [tokenizer.eos_token_id]
-        chosen_input_ids = chosen_input_ids + [tokenizer.eos_token_id]
-        rejected_input_ids = rejected_input_ids + [tokenizer.eos_token_id]
-
-        # Truncate prompt and completion sequences
-        if max_prompt_length is not None:
-            prompt_input_ids = prompt_input_ids[-max_prompt_length:]
-        if max_completion_length is not None:
-            chosen_input_ids = chosen_input_ids[:max_completion_length]
-            rejected_input_ids = rejected_input_ids[:max_completion_length]
-
-        output = {
-            "prompt_input_ids": prompt_input_ids,
-            "pixel_values": pixel_values,
-            "chosen_input_ids": chosen_input_ids,
-            "rejected_input_ids": rejected_input_ids,
-        }
-
-        if "pixel_attention_mask" in processed_features:
-            output["pixel_attention_mask"] = processed_features["pixel_attention_mask"][0]
-        if "image_sizes" in processed_features:
-            output["image_sizes"] = processed_features["image_sizes"][0]
-        if "token_type_ids" in processed_features:
-            output["token_type_ids"] = processed_features["token_type_ids"][0]
-
-        return output
 
     def _set_signature_columns_if_needed(self):
         # If `self.args.remove_unused_columns` is True, non-signature columns are removed.
-        # By default, this method sets `self._signature_columns` to the model's expected inputs.
-        # In DPOTrainer, we preprocess data, so using the model's signature columns doesn't work.
-        # Instead, we set them to the columns expected by `DataCollatorForPreference`, hence the override.
+        # By default, this method sets `self._signature_columns` to the model's expected inputs (usually, "input_ids"
+        # and "attention_mask").
         if self._signature_columns is None:
-            self._signature_columns = [
-                "prompt_input_ids",
-                "chosen_input_ids",
-                "rejected_input_ids",
-                "image_sizes",
-                "pixel_position_ids",
-                "image_position_ids",
-                "mm_token_type_ids",
-                "token_type_ids",
-                "ref_chosen_logps",
-                "ref_rejected_logps",
-            ]
-
-    def get_train_dataloader(self) -> DataLoader:
-        """
-        Returns the training [`~torch.utils.data.DataLoader`].
-
-        Subclass of transformers.src.transformers.trainer.get_train_dataloader to precompute `ref_log_probs`.
-        """
-
-        if self.precompute_ref_log_probs and not self._precomputed_train_ref_log_probs:
-            batch_size = self.args.precompute_ref_batch_size or self.args.per_device_train_batch_size
-            dataloader_params = {
-                "batch_size": batch_size,
-                "collate_fn": self.data_collator,
-                "num_workers": self.args.dataloader_num_workers,
-                "pin_memory": self.args.dataloader_pin_memory,
-                "shuffle": False,
-            }
-
-            # prepare dataloader
-            data_loader = self.accelerator.prepare(DataLoader(self.train_dataset, **dataloader_params))
-
-            ref_chosen_logps = []
-            ref_rejected_logps = []
-            for padded_batch in tqdm(iterable=data_loader, desc="Train dataset reference log probs"):
-                ref_chosen_logp, ref_rejected_logp = self.compute_ref_log_probs(padded_batch)
-                ref_chosen_logp, ref_rejected_logp = self.accelerator.gather_for_metrics(
-                    (ref_chosen_logp, ref_rejected_logp)
-                )
-                ref_chosen_logps.append(ref_chosen_logp.cpu())
-                ref_rejected_logps.append(ref_rejected_logp.cpu())
-
-                # Unnecessary cache clearing to avoid OOM
-                empty_cache()
-                self.accelerator.free_memory()
-
-            all_ref_chosen_logps = torch.cat(ref_chosen_logps).float().numpy()
-            all_ref_rejected_logps = torch.cat(ref_rejected_logps).float().numpy()
-
-            self.train_dataset = self.train_dataset.add_column(name="ref_chosen_logps", column=all_ref_chosen_logps)
-            self.train_dataset = self.train_dataset.add_column(
-                name="ref_rejected_logps", column=all_ref_rejected_logps
-            )
-
-            self._precomputed_train_ref_log_probs = True
-
-        return super().get_train_dataloader()
-
-    def get_eval_dataloader(self, eval_dataset: Optional[Dataset] = None) -> DataLoader:
-        """
-        Returns the evaluation [`~torch.utils.data.DataLoader`].
-
-        Subclass of transformers.src.transformers.trainer.get_eval_dataloader to precompute `ref_log_probs`.
-
-        Args:
-            eval_dataset (`torch.utils.data.Dataset`, *optional*):
-                If provided, will override `self.eval_dataset`. If it is a [`~datasets.Dataset`], columns not accepted
-                by the `model.forward()` method are automatically removed. It must implement `__len__`.
-        """
-        if eval_dataset is None and self.eval_dataset is None:
-            raise ValueError("Trainer: evaluation requires an eval_dataset.")
-        eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
-
-        if self.precompute_ref_log_probs and not self._precomputed_eval_ref_log_probs:
-            batch_size = self.args.precompute_ref_batch_size or self.args.per_device_eval_batch_size
-            dataloader_params = {
-                "batch_size": batch_size,
-                "collate_fn": self.data_collator,
-                "num_workers": self.args.dataloader_num_workers,
-                "pin_memory": self.args.dataloader_pin_memory,
-                "shuffle": False,
-            }
-
-            # prepare dataloader
-            data_loader = self.accelerator.prepare(DataLoader(eval_dataset, **dataloader_params))
-
-            ref_chosen_logps = []
-            ref_rejected_logps = []
-            for padded_batch in tqdm(iterable=data_loader, desc="Eval dataset reference log probs"):
-                ref_chosen_logp, ref_rejected_logp = self.compute_ref_log_probs(padded_batch)
-                ref_chosen_logp, ref_rejected_logp = self.accelerator.gather_for_metrics(
-                    (ref_chosen_logp, ref_rejected_logp)
-                )
-                ref_chosen_logps.append(ref_chosen_logp.cpu())
-                ref_rejected_logps.append(ref_rejected_logp.cpu())
-
-            all_ref_chosen_logps = torch.cat(ref_chosen_logps).float().numpy()
-            all_ref_rejected_logps = torch.cat(ref_rejected_logps).float().numpy()
-
-            eval_dataset = eval_dataset.add_column(name="ref_chosen_logps", column=all_ref_chosen_logps)
-            eval_dataset = eval_dataset.add_column(name="ref_rejected_logps", column=all_ref_rejected_logps)
-
-            # Save calculated ref_chosen_logps and ref_rejected_logps to the eval_dataset for subsequent runs
-            if self.eval_dataset is not None:
-                self.eval_dataset = eval_dataset
-            self._precomputed_eval_ref_log_probs = True
-
-        return super().get_eval_dataloader(eval_dataset=eval_dataset)
-
-    @contextmanager
-    def null_ref_context(self):
-        """Context manager for handling null reference model (that is, peft adapter manipulation)."""
-        with (
-            self.accelerator.unwrap_model(self.model).disable_adapter()
-            if self.is_peft_model and not self.ref_adapter_name
-            else nullcontext()
-        ):
-            if self.ref_adapter_name:
-                self.model.set_adapter(self.ref_adapter_name)
-            yield
-            if self.ref_adapter_name:
-                self.model.set_adapter(self.model_adapter_name or "default")
-
-    def compute_ref_log_probs(self, batch: dict[str, torch.LongTensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Computes log probabilities of the reference model for a single padded batch of a DPO specific dataset."""
-        compte_ref_context_manager = (
-            autocast(self.accelerator.device.type) if self._peft_has_been_casted_to_bf16 else nullcontext()
-        )
-        with torch.no_grad(), compte_ref_context_manager:
-            if self.ref_model is None:
-                with self.null_ref_context():
-                    ref_model_output = self.concatenated_forward(self.model, batch, is_ref_model=True)
+            if self._is_vision_dataset:
+                self._signature_columns = [
+                    "prompt",
+                    "chosen",
+                    "rejected",
+                    "image",
+                    "images",
+                    "tools",
+                    "chat_template_kwargs",
+                ]
             else:
-                ref_model_output = self.concatenated_forward(self.ref_model, batch, is_ref_model=True)
-        return ref_model_output["chosen_logps"], ref_model_output["rejected_logps"]
+                self._signature_columns = [
+                    "prompt_ids",
+                    "chosen_ids",
+                    "rejected_ids",
+                    "ref_chosen_logps",
+                    "ref_rejected_logps",
+                ]
 
-    @staticmethod
-    def concatenated_inputs(
-        batch: dict[str, Union[list, torch.LongTensor]], padding_value: int
-    ) -> dict[str, torch.LongTensor]:
-        """
-        Concatenate the `chosen` and `rejected` inputs from the batch into a single tensor for both the prompt and
-        completion sequences.
-
-        Args:
-            batch (`dict[str, Union[list, torch.LongTensor]]`):
-                A batch of input data. The batch must contain the following keys:
-
-                - `"prompt_input_ids"`: Tensor of shape `(batch_size, prompt_length)` representing the prompt input
-                  IDs.
-                - `"chosen_input_ids"`: Tensor of shape `(batch_size, chosen_length)` representing the chosen
-                  completion input IDs.
-                - `"rejected_input_ids"`: Tensor of shape `(batch_size, rejected_length)` representing the rejected
-                  completion input IDs.
-                - `"prompt_pixel_values"` (optional): Tensor for pixel values, if available.
-                - `"prompt_pixel_attention_mask"` (optional): Tensor for pixel attention masks, if available.
-
-            padding_value (`int`):
-                The padding value to use for the concatenated completion sequences (`chosen_input_ids` and
-                `rejected_input_ids`).
-
-        Returns:
-            `dict[str, torch.LongTensor]`: A dictionary containing:
-
-                - `"prompt_input_ids"`: Concatenated prompt input IDs of shape `(2 * batch_size, prompt_length)`.
-                - `"completion_input_ids"`: Concatenated chosen and rejected completion input IDs of shape `(2 *
-                  batch_size, max_completion_length)`.
-                - `"prompt_attention_mask"`: Concatenated prompt attention masks of shape `(2 * batch_size,
-                  prompt_length)`.
-                - `"completion_attention_mask"`: Concatenated chosen and rejected attention masks of shape `(2 *
-                  batch_size, max_completion_length)`.
-                - `"pixel_values"` (optional): Concatenated pixel values if `"prompt_pixel_values"` are present.
-                - `"pixel_attention_mask"` (optional): Concatenated pixel attention masks if
-                  `"prompt_pixel_attention_mask"` are present.
-
-        Notes:
-            The completion input IDs and attention masks are padded to the maximum completion length of the chosen or
-            rejected sequences.
-        """
-        output = {}
-
-        # For the prompt, the input_ids are the same for both the chosen and rejected responses
-        output["prompt_input_ids"] = torch.cat([batch["prompt_input_ids"], batch["prompt_input_ids"]], dim=0)
-        output["prompt_attention_mask"] = torch.cat(
-            [batch["prompt_attention_mask"], batch["prompt_attention_mask"]], dim=0
-        )
-        if "pixel_values" in batch:
-            output["pixel_values"] = torch.cat([batch["pixel_values"], batch["pixel_values"]], dim=0)
-
-        if "pixel_attention_mask" in batch:
-            output["pixel_attention_mask"] = torch.cat(
-                [batch["pixel_attention_mask"], batch["pixel_attention_mask"]], dim=0
+    def _precompute_ref_logps(self, dataset: Dataset, name: str, batch_size: int) -> Dataset:
+        if isinstance(dataset, IterableDataset):
+            raise ValueError(
+                "`precompute_ref_log_probs=True` is not supported with IterableDataset. Please use a map-style "
+                "Dataset or set `precompute_ref_log_probs=False`."
             )
-        if "image_sizes" in batch:
-            output["image_sizes"] = torch.cat([batch["image_sizes"], batch["image_sizes"]], dim=0)
-        if "pixel_position_ids" in batch:
-            output["pixel_position_ids"] = torch.cat((batch["pixel_position_ids"], batch["pixel_position_ids"]), dim=0)
-        if "image_position_ids" in batch:
-            output["image_position_ids"] = torch.cat((batch["image_position_ids"], batch["image_position_ids"]), dim=0)
-        if "mm_token_type_ids" in batch:
-            output["mm_token_type_ids"] = torch.cat((batch["mm_token_type_ids"], batch["mm_token_type_ids"]), dim=0)
-        if "token_type_ids" in batch:
-            output["token_type_ids"] = torch.cat((batch["token_type_ids"], batch["token_type_ids"]))
+        model_hash = self._precompute_model_hash
+        # Both inputs are rank-dependent under distributed training (ZeRO-3 shards the model), so broadcast rank 0's
+        # value so all ranks share one cache file.
+        fingerprint = [Hasher.hash((dataset._fingerprint, model_hash))]
+        broadcast_object_list(fingerprint, from_process=0)
+        fingerprint = fingerprint[0]
+        cache_file = dataset._get_cache_file_path(fingerprint)
 
-        # Concatenate the chosen and rejected completions
-        max_completion_length = max(batch["chosen_input_ids"].shape[1], batch["rejected_input_ids"].shape[1])
-        output["completion_input_ids"] = torch.cat(
-            (
-                pad_to_length(batch["chosen_input_ids"], max_completion_length, pad_value=padding_value),
-                pad_to_length(batch["rejected_input_ids"], max_completion_length, pad_value=padding_value),
-            ),
+        if os.path.exists(cache_file):
+            return concatenate_datasets([dataset, Dataset.from_file(cache_file)], axis=1)
+
+        dataloader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collate_fn=self.data_collator,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+            shuffle=False,
         )
-        output["completion_attention_mask"] = torch.cat(
-            (
-                pad_to_length(batch["chosen_attention_mask"], max_completion_length, pad_value=0),
-                pad_to_length(batch["rejected_attention_mask"], max_completion_length, pad_value=0),
-            ),
-        )
+        data_loader = self.accelerator.prepare(dataloader)
 
-        return output
+        # This runs before the parent class prepares the model in `train`, so with DeepSpeed the parameters are still
+        # on CPU (ZeRO-1/2) and sharded (ZeRO-3). Wrap the model in an inference engine to place and gather them. Build
+        # it once and reuse it across precompute passes (train, eval, and later `evaluate` calls)
+        if self.ref_model is None and self.is_deepspeed_enabled:
+            if self._precompute_engine is None:
+                self._precompute_engine = prepare_deepspeed(self.model, self.accelerator)
+            model = self._precompute_engine
+        else:
+            model = self.ref_model or self.model
 
-    def dpo_loss(
-        self,
-        chosen_logps: torch.FloatTensor,
-        rejected_logps: torch.FloatTensor,
-        ref_chosen_logps: torch.FloatTensor,
-        ref_rejected_logps: torch.FloatTensor,
-        loss_type: str = "sigmoid",
-        model_output: dict[str, torch.FloatTensor] = None,
-    ) -> tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        """
-        Compute the DPO loss for a batch of policy and reference model log probabilities.
+        ref_chosen_logps = []
+        ref_rejected_logps = []
+        for padded_batch in tqdm(
+            iterable=data_loader,
+            desc=f"Computing reference log probs for {name} dataset",
+            disable=bool(os.environ.get("TQDM_DISABLE", "")),
+        ):
+            ref_chosen_logp, ref_rejected_logp = self.compute_ref_log_probs(model, padded_batch)
+            ref_chosen_logp, ref_rejected_logp = self.accelerator.gather_for_metrics(
+                (ref_chosen_logp, ref_rejected_logp)
+            )
+            ref_chosen_logps.append(ref_chosen_logp.cpu())
+            ref_rejected_logps.append(ref_rejected_logp.cpu())
 
-        Args:
-            chosen_logps (`torch.FloatTensor`):
-                Log probabilities of the model for the chosen responses. Shape: `(batch_size,)`.
-            rejected_logps (`torch.FloatTensor`):
-                Log probabilities of the model for the rejected responses. Shape: `(batch_size,)`.
-            ref_chosen_logps (`torch.FloatTensor`):
-                Log probabilities of the reference model for the chosen responses. Shape: `(batch_size,)`.
-            ref_rejected_logps (`torch.FloatTensor`):
-                Log probabilities of the reference model for the rejected responses. Shape: `(batch_size,)`.
-            loss_type (`str`, defaults to `"sigmoid"`):
-                The type of loss to compute. One of:
-                - `"sigmoid"`: Sigmoid loss from the original [DPO](https://huggingface.co/papers/2305.18290) paper.
-                - `"hinge"`: Hinge loss on the normalized likelihood from the
-                  [SLiC](https://huggingface.co/papers/2305.10425) paper.
-                - `"ipo"`: IPO loss from the [IPO](https://huggingface.co/papers/2310.12036) paper.
-                - `"exo_pair"`: Pairwise EXO loss from the [EXO](https://huggingface.co/papers/2402.00856) paper.
-                - `"nca_pair"`: Pairwise NCA loss from the [NCA](https://huggingface.co/papers/2402.05369) paper.
-                - `"robust"`: Unbiased estimate of the DPO loss that is robust to preference noise from the [Robust
-                  DPO](https://huggingface.co/papers/2403.00409) paper.
-                - `"bco_pair"`: Pairwise BCO loss from the [BCO](https://huggingface.co/papers/2404.04656) paper.
-                - `"sppo_hard"`: SPPO loss with hard label from the [SPPO](https://huggingface.co/papers/2405.00675)
-                  paper.
-                - `"aot"`: AOT loss for paired datasets from the [AOT](https://huggingface.co/papers/2406.05882) paper.
-                - `"aot_pair"`: AOT loss for unpaired datasets from the [AOT](https://huggingface.co/papers/2406.05882)
-                  paper.
-                - `"discopop"`: DiscoPOP (a.k.a Log-Ratio Modulated Loss, LRML) loss from the
-                  [DiscoPOP](https://huggingface.co/papers/2406.08414) paper.
-                - `"apo_zero"`: APO-zero loss from the [APO](https://huggingface.co/papers/2408.06266) paper.
-                - `"apo_down"`: APO-down loss from the [APO](https://huggingface.co/papers/2408.06266) paper.
-                - `"sft"`: Negative log-likelihood loss (standard supervised fine-tuning loss).
-            model_output (`dict[str, torch.FloatTensor]`, *optional*):
-                The output of the model's forward pass. This is used to compute auxiliary losses if enabled.
+        ref_chosen_logps = torch.cat(ref_chosen_logps)
+        ref_rejected_logps = torch.cat(ref_rejected_logps)
 
-        Returns:
-            A tuple of three tensors: `(losses, chosen_rewards, rejected_rewards)`. The losses tensor contains the DPO
-            loss for each example in the batch. The `chosen_rewards` and `rejected_rewards` tensors contain the rewards
-            for the chosen and rejected responses, respectively.
-        """
+        if self.accelerator.is_main_process:
+
+            def add_ref_logps(batch, indices):
+                return {
+                    "ref_chosen_logps": ref_chosen_logps[indices],
+                    "ref_rejected_logps": ref_rejected_logps[indices],
+                }
+
+            dataset.map(
+                add_ref_logps,
+                with_indices=True,
+                batched=True,
+                remove_columns=dataset.column_names,
+                new_fingerprint=fingerprint,
+                cache_file_name=cache_file,
+                desc=f"Caching reference log probs for {name} dataset",
+            )
+        self.accelerator.wait_for_everyone()
+
+        return concatenate_datasets([dataset, Dataset.from_file(cache_file)], axis=1)
+
+    def compute_ref_log_probs(self, model, inputs):
+        """Computes reference log probabilities for a single padded batch."""
+        device = self.accelerator.device
+        _non_model_keys = {"completion_mask", "ref_chosen_logps", "ref_rejected_logps"}
+        model_kwargs = {k: v for k, v in inputs.items() if k not in _non_model_keys}
+        model_kwargs["use_cache"] = False
+        labels = inputs["input_ids"].masked_fill(inputs["completion_mask"] == 0, -100)
+
+        adapter_context = contextlib.nullcontext()
+        if self.ref_model is None and is_peft_model(self.model):
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            adapter_context = use_adapter(
+                unwrapped_model, adapter_name="ref" if "ref" in unwrapped_model.peft_config else None
+            )
+
+        with (
+            torch.no_grad(),
+            disable_gradient_checkpointing(self.model, self.args.gradient_checkpointing_kwargs),
+            adapter_context,
+            self.accelerator.autocast(),
+        ):
+            ref_per_token_logps = model(**model_kwargs, labels=labels, fused_lm_head=True).log_probs
+
+        shift_completion_mask = inputs["completion_mask"][..., 1:]
+        # Prompt-learning PEFT prepends virtual tokens to the outputs; keep the positions of the real tokens
+        ref_per_token_logps = ref_per_token_logps[:, -shift_completion_mask.size(1) :]
+        if self.ld_alpha is None:
+            ref_logps = ref_per_token_logps.sum(dim=1)
+        else:
+            comp_pos = shift_completion_mask.cumsum(dim=1)
+            comp_lens = shift_completion_mask.sum(dim=1).long()
+            chosen_lens, rejected_lens = comp_lens.chunk(2, dim=0)
+            shared_lens = torch.minimum(chosen_lens, rejected_lens)
+            shared_lens = torch.cat([shared_lens, shared_lens], dim=0).to(device)
+            shared_mask = (comp_pos > 0) & (comp_pos <= shared_lens.unsqueeze(1))
+            tail_mask = comp_pos > shared_lens.unsqueeze(1)
+            shared_logps = (ref_per_token_logps * shared_mask).sum(dim=1)
+            tail_logps = (ref_per_token_logps * tail_mask).sum(dim=1)
+            ref_logps = shared_logps + self.ld_alpha * tail_logps
+
+        return ref_logps.chunk(2, dim=0)
+
+    def _compute_loss(self, model, inputs, return_outputs):
+        mode = "train" if self.model.training else "eval"
         device = self.accelerator.device
 
+        _non_model_keys = {"completion_mask", "ref_chosen_logps", "ref_rejected_logps"}
+        model_kwargs = {k: v for k, v in inputs.items() if k not in _non_model_keys}
+        model_kwargs["use_cache"] = False
+        # MoE models: request router logits so the model returns `outputs.aux_loss`. VLM wrappers honor this only
+        # as a forward kwarg (not from the model config), so it must be passed here.
+        if self.aux_loss_enabled:
+            model_kwargs["output_router_logits"] = True
+        completion_mask = inputs["completion_mask"]
+        shift_completion_mask = completion_mask[..., 1:]
+        labels = inputs["input_ids"].masked_fill(completion_mask == 0, -100)
+        outputs = model(**model_kwargs, labels=labels, fused_lm_head=True)
+        # Prompt-learning PEFT prepends virtual tokens to the outputs; keep the positions of the real tokens
+        seq_len = shift_completion_mask.size(1)
+        per_token_logps = outputs.log_probs[:, -seq_len:]
+        if self.ld_alpha is None:
+            logps = per_token_logps.sum(dim=1)  # sum over sequence length
+        else:
+            comp_pos = shift_completion_mask.cumsum(dim=1)
+            comp_lens = shift_completion_mask.sum(dim=1).long()
+            chosen_lens, rejected_lens = comp_lens.chunk(2, dim=0)
+            shared_lens = torch.minimum(chosen_lens, rejected_lens)
+            shared_lens = torch.cat([shared_lens, shared_lens], dim=0).to(device)
+            shared_mask = (comp_pos > 0) & (comp_pos <= shared_lens.unsqueeze(1))  # shared: 1 <= pos <= shared_len
+            tail_mask = comp_pos > shared_lens.unsqueeze(1)  # tail: pos > shared_len
+            shared_logps = (per_token_logps * shared_mask).sum(dim=1)
+            tail_logps = (per_token_logps * tail_mask).sum(dim=1)
+            logps = shared_logps + self.ld_alpha * tail_logps
+        chosen_logps, rejected_logps = logps.chunk(2, dim=0)  # batch is [chosen, rejected]
+
+        if self.precompute_ref_logps:
+            ref_chosen_logps, ref_rejected_logps = inputs["ref_chosen_logps"], inputs["ref_rejected_logps"]
+        else:
+            # The reference forward only needs logits for log-probs. Drop `output_router_logits` so the frozen
+            # reference model does not materialize router logits and compute a discarded MoE aux loss.
+            ref_model_kwargs = {k: v for k, v in model_kwargs.items() if k != "output_router_logits"}
+            # When gradient checkpointing is enabled with use_reentrant=True (non default), calling the model inside a
+            # torch.no_grad() block triggers a harmless PyTorch warning ("None of the inputs have requires_grad=True").
+            # Temporarily disable checkpointing to avoid this warning during inference.
+            with torch.no_grad(), disable_gradient_checkpointing(self.model, self.args.gradient_checkpointing_kwargs):
+                if is_peft_model(self.model) and self.ref_model is None:
+                    # When training a PEFT adapter, how we obtain the reference depends on the setup:
+                    # - New adapter: disabling adapters yields the base model.
+                    # - Re-training an existing adapter: an initial copy is loaded under the name "ref".
+                    ref_model_unwrapped = self.accelerator.unwrap_model(self.model)
+                    with use_adapter(
+                        ref_model_unwrapped, adapter_name="ref" if "ref" in ref_model_unwrapped.peft_config else None
+                    ):
+                        ref_outputs = self.model(**ref_model_kwargs, labels=labels, fused_lm_head=True)
+                else:
+                    ref_outputs = self.ref_model(**ref_model_kwargs, labels=labels, fused_lm_head=True)
+            ref_per_token_logps = ref_outputs.log_probs[:, -seq_len:]
+            if self.ld_alpha is None:
+                ref_logps = ref_per_token_logps.sum(dim=1)  # sum over sequence length
+            else:
+                # reuse comp_pos/shared_mask/tail_mask computed above (they depend only on completion_mask)
+                ref_shared_logps = (ref_per_token_logps * shared_mask).sum(dim=1)
+                ref_tail_logps = (ref_per_token_logps * tail_mask).sum(dim=1)
+                ref_logps = ref_shared_logps + self.ld_alpha * ref_tail_logps
+            ref_chosen_logps, ref_rejected_logps = ref_logps.chunk(2, dim=0)  # batch is [chosen, rejected]
+
         # Get the log ratios for the chosen and rejected responses
-        chosen_logratios = chosen_logps.to(device) - (not self.reference_free) * ref_chosen_logps.to(device)
-        rejected_logratios = rejected_logps.to(device) - (not self.reference_free) * ref_rejected_logps.to(device)
+        chosen_logratios = chosen_logps - ref_chosen_logps
+        rejected_logratios = rejected_logps - ref_rejected_logps
 
-        if self.f_divergence_type == FDivergenceType.ALPHA_DIVERGENCE:
-            # The alpha-divergence formula: (1 - u^-alpha) / alpha
-            # The divergence difference between the chosen and rejected sample is:
-            #     (1 - u[w]^-alpha) / alpha - (1 - u[l]^-alpha) / alpha
-            #        = (u[l]^-alpha - u[w]^-alpha) / alpha
-            # where u[w] and u[l] are the policy/reference probability ratios
-            # for the chosen and rejected samples, respectively.
-            alpha_coef = FDivergenceConstants.ALPHA_DIVERGENCE_COEF_DEFAULT
-            if self.f_divergence_params and FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY in self.f_divergence_params:
-                alpha_coef = float(self.f_divergence_params[FDivergenceConstants.ALPHA_DIVERGENCE_COEF_KEY])
-            logits = (cap_exp(rejected_logratios * -alpha_coef) - cap_exp(chosen_logratios * -alpha_coef)) / alpha_coef
-        else:
-            logratios = chosen_logps - rejected_logps
-            if self.reference_free:
-                ref_logratios = torch.tensor([0], dtype=logratios.dtype, device=logratios.device)
+        if self.f_divergence_type == "reverse_kl":  # standard DPO
+            chosen_scores = chosen_logratios
+            rejected_scores = rejected_logratios
+        elif self.f_divergence_type == "forward_kl":
+            # f'(t) = 1 - 1/t
+            chosen_scores = 1 - torch.exp(-chosen_logratios)
+            rejected_scores = 1 - torch.exp(-rejected_logratios)
+        elif self.f_divergence_type == "js_divergence":
+            # f'(t) = log(2t/(t+1)) = log 2 + logsigmoid(log t)
+            chosen_scores = math.log(2) + F.logsigmoid(chosen_logratios)
+            rejected_scores = math.log(2) + F.logsigmoid(rejected_logratios)
+        elif self.f_divergence_type == "alpha_divergence":
+            # alpha-divergence: f'(t) = (t^(α-1) - 1)/(α-1)
+            if abs(self.f_alpha_divergence_coef - 1.0) < 1e-6:  # limit case f'(t) -> log(t), fall back to reverse_kl
+                chosen_scores = chosen_logratios
+                rejected_scores = rejected_logratios
             else:
+                coef = 1.0 / (self.f_alpha_divergence_coef - 1.0)
+                t_chosen = (self.f_alpha_divergence_coef - 1.0) * chosen_logratios
+                t_rejected = (self.f_alpha_divergence_coef - 1.0) * rejected_logratios
+                dtype = t_chosen.dtype
+                # Clamp max so exp(.) stays representable after casting back
+                clamp_max = {torch.float16: 11.0, torch.bfloat16: 80.0, torch.float32: 80.0}[dtype]
+                t_chosen_float = torch.clamp(t_chosen.float(), max=clamp_max)
+                t_rejected_float = torch.clamp(t_rejected.float(), max=clamp_max)
+                chosen_scores = (torch.exp(t_chosen_float) - 1.0).to(dtype) * coef
+                rejected_scores = (torch.exp(t_rejected_float) - 1.0).to(dtype) * coef
+        else:
+            raise ValueError(f"Unknown f_divergence_type: {self.f_divergence_type}")
+
+        delta_score = chosen_scores - rejected_scores
+
+        loss = 0.0
+        for loss_type, loss_weight in zip(self.loss_types, self.loss_weights, strict=True):
+            if loss_type == "sigmoid":
+                per_sequence_loss = -F.logsigmoid(self.beta * delta_score)
+
+            elif loss_type == "hinge":
+                per_sequence_loss = torch.relu(1 - self.beta * delta_score)
+
+            elif loss_type == "ipo":
+                # IPO uses sequence-level log-prob differences; in code these are token-summed over the completion,
+                # which makes the squared loss scale with completion length. We therefore normalize by the number of
+                # completion tokens (average per token) to make β/loss comparable across variable lengths. This length
+                # normalization is not explicitly discussed in the IPO paper; we confirmed this choice with the IPO
+                # authors, and the results reported in the paper correspond to this normalized form.
+                chosen_mask, rejected_mask = completion_mask.chunk(2, dim=0)
+                chosen_avg_score = chosen_scores / chosen_mask.sum(dim=1).clamp(min=1.0)
+                rejected_avg_score = rejected_scores / rejected_mask.sum(dim=1).clamp(min=1.0)
+                ipo_delta = chosen_avg_score - rejected_avg_score
+                # (Eq. 17) of the paper where beta is the regularization parameter for the IPO loss, denoted by τ.
+                per_sequence_loss = (ipo_delta - 1 / (2 * self.beta)) ** 2
+
+            elif loss_type == "exo_pair":
+                # Implements EXO-pref from the paper https://huggingface.co/papers/2402.00856 (Eq. 16)
+                # Minimize KL(p_fθ || p_rh) for K=2; p_fθ = softmax(βπ * (log πθ − log π_ref)) over {chosen, rejected}
+                # p_rh = [(1−ε), ε]; expanded KL gives the weighted logsigmoid form below
+                epsilon = torch.tensor(self.label_smoothing, device=device)
+                qw = torch.sigmoid(self.beta * delta_score)
+                log_qw = F.logsigmoid(self.beta * delta_score)
+                log_pw = torch.log1p(-epsilon)
+                ql = torch.sigmoid(-self.beta * delta_score)
+                log_ql = F.logsigmoid(-self.beta * delta_score)
+                log_pl = torch.log(epsilon)
+                per_sequence_loss = qw * (log_qw - log_pw) + ql * (log_ql - log_pl)
+
+            elif loss_type == "nca_pair":
+                chosen_rewards = self.beta * chosen_logratios
+                rejected_rewards = self.beta * rejected_logratios
+                per_sequence_loss = (
+                    -F.logsigmoid(chosen_rewards)
+                    - 0.5 * F.logsigmoid(-chosen_rewards)
+                    - 0.5 * F.logsigmoid(-rejected_rewards)
+                )
+
+            elif loss_type == "robust":
+                clean_loss_term = -(1 - self.label_smoothing) * F.logsigmoid(self.beta * delta_score)
+                flipped_loss_term = -self.label_smoothing * F.logsigmoid(-self.beta * delta_score)
+                per_sequence_loss = (clean_loss_term - flipped_loss_term) / (1 - 2 * self.label_smoothing)
+
+            elif loss_type == "bco_pair":
+                chosen_rewards = self.beta * chosen_logratios
+                rejected_rewards = self.beta * rejected_logratios
+                per_sequence_loss = -F.logsigmoid(chosen_rewards) - F.logsigmoid(-rejected_rewards)
+
+            elif loss_type == "sppo_hard":
+                # In the paper (https://huggingface.co/papers/2405.00675), SPPO employs a soft probability approach,
+                # estimated using the PairRM score. The probability calculation is conducted outside of the trainer
+                # class. The version described here is the hard probability version, where P in Equation (4.7) of
+                # Algorithm 1 is set to 1 for the winner and 0 for the loser.
+                winner_margin_error = (chosen_logratios - 0.5 / self.beta) ** 2
+                loser_margin_error = (rejected_logratios + 0.5 / self.beta) ** 2
+                per_sequence_loss = winner_margin_error + loser_margin_error
+
+            elif loss_type == "aot":
+                logratios = chosen_logps - rejected_logps
                 ref_logratios = ref_chosen_logps - ref_rejected_logps
-
-            logratios = logratios.to(self.accelerator.device)
-            ref_logratios = ref_logratios.to(self.accelerator.device)
-            logits = logratios - ref_logratios
-
-            if self.f_divergence_type == FDivergenceType.JS_DIVERGENCE:
-                # The js-divergence formula: log(2 * u / (1 + u))
-                # The divergence difference between the chosen and rejected sample is:
-                #     log(2 * u[w] / (1 + u[w])) - log(2 * u[l] / (1 + u[l]))
-                #       = log(u[w]) - log(u[l]) - (log(1 + u[w]) - log(1 + u[l]))
-                # where u[w] and u[l] are the policy/reference probability ratios
-                # for the chosen and rejected samples, respectively.
-                logits -= F.softplus(chosen_logratios) - F.softplus(rejected_logratios)
-
-        # The beta is a temperature parameter for the DPO loss, typically something in the range of 0.1 to 0.5.
-        # We ignore the reference model as beta -> 0. The label_smoothing parameter encodes our uncertainty about the
-        # labels and calculates a conservative DPO loss.
-        if loss_type == "sigmoid":
-            losses = (
-                -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
-                - F.logsigmoid(-self.beta * logits) * self.label_smoothing
-            )
-
-        elif loss_type == "robust":
-            losses = (
-                -F.logsigmoid(self.beta * logits) * (1 - self.label_smoothing)
-                + F.logsigmoid(-self.beta * logits) * self.label_smoothing
-            ) / (1 - 2 * self.label_smoothing)
-
-        elif loss_type == "exo_pair":
-            # eqn (16) of the EXO paper: https://huggingface.co/papers/2402.00856
-            import math
-
-            if self.label_smoothing == 0:
-                self.label_smoothing = 1e-3
-            losses = (self.beta * logits).sigmoid() * (
-                F.logsigmoid(self.beta * logits) - math.log(1 - self.label_smoothing)
-            ) + (-self.beta * logits).sigmoid() * (F.logsigmoid(-self.beta * logits) - math.log(self.label_smoothing))
-
-        elif loss_type == "hinge":
-            losses = torch.relu(1 - self.beta * logits)
-
-        elif loss_type == "ipo":
-            # eqn (17) of the paper where beta is the regularization parameter for the IPO loss, denoted by tau in the paper.
-            losses = (logits - 1 / (2 * self.beta)) ** 2
-
-        elif loss_type == "bco_pair":
-            chosen_logratios = chosen_logps - ref_chosen_logps
-            rejected_logratios = rejected_logps - ref_rejected_logps
-            chosen_rewards = self.beta * chosen_logratios
-            rejected_rewards = self.beta * rejected_logratios
-            rewards = torch.cat((chosen_rewards, rejected_rewards), 0).mean().detach()
-            self.running.update(rewards)
-            delta = self.running.mean
-            losses = -F.logsigmoid((self.beta * chosen_logratios) - delta) - F.logsigmoid(
-                -(self.beta * rejected_logratios - delta)
-            )
-
-        elif loss_type == "sppo_hard":
-            # In the paper (https://huggingface.co/papers/2405.00675), SPPO employs a soft probability approach,
-            # estimated using the PairRM score. The probability calculation is conducted outside of the trainer class.
-            # The version described here is the hard probability version, where P in Equation (4.7) of Algorithm 1 is
-            # set to 1 for the winner and 0 for the loser.
-            a = chosen_logps - ref_chosen_logps
-            b = rejected_logps - ref_rejected_logps
-            losses = (a - 0.5 / self.beta) ** 2 + (b + 0.5 / self.beta) ** 2
-
-        elif loss_type == "nca_pair":
-            chosen_rewards = (chosen_logps - ref_chosen_logps) * self.beta
-            rejected_rewards = (rejected_logps - ref_rejected_logps) * self.beta
-            losses = (
-                -F.logsigmoid(chosen_rewards)
-                - 0.5 * F.logsigmoid(-chosen_rewards)
-                - 0.5 * F.logsigmoid(-rejected_rewards)
-            )
-
-        elif loss_type == "aot_pair":
-            chosen_logratios = chosen_logps - ref_chosen_logps
-            rejected_logratios = rejected_logps - ref_rejected_logps
-            chosen_logratios_sorted, _ = torch.sort(chosen_logratios, dim=0)
-            rejected_logratios_sorted, _ = torch.sort(rejected_logratios, dim=0)
-            delta = chosen_logratios_sorted - rejected_logratios_sorted
-            losses = (
-                -F.logsigmoid(self.beta * delta) * (1 - self.label_smoothing)
-                - F.logsigmoid(-self.beta * delta) * self.label_smoothing
-            )
-
-        elif loss_type == "aot":
-            logratios = chosen_logps - rejected_logps
-            ref_logratios = ref_chosen_logps - ref_rejected_logps
-            logratios_sorted, _ = torch.sort(logratios, dim=0)
-            ref_logratios_sorted, _ = torch.sort(ref_logratios, dim=0)
-            delta = logratios_sorted - ref_logratios_sorted
-            losses = (
-                -F.logsigmoid(self.beta * delta) * (1 - self.label_smoothing)
-                - F.logsigmoid(-self.beta * delta) * self.label_smoothing
-            )
-
-        elif loss_type == "apo_zero":
-            # Eqn (7) of the APO paper (https://huggingface.co/papers/2408.06266)
-            # Use this loss when you believe the chosen outputs are better than your model's default output
-            losses_chosen = 1 - F.sigmoid(self.beta * chosen_logratios)  # Increase chosen likelihood
-            losses_rejected = F.sigmoid(self.beta * rejected_logratios)  # Decrease rejected likelihood
-            losses = losses_chosen + losses_rejected
-
-        elif loss_type == "apo_down":
-            # Eqn (8) of the APO paper (https://huggingface.co/papers/2408.06266)
-            # Use this loss when you believe the chosen outputs are worse than your model's default output.
-            # Decrease chosen likelihood and decrease rejected likelihood more
-            losses_chosen = F.sigmoid(self.beta * chosen_logratios)
-            losses_rejected = 1 - F.sigmoid(self.beta * (chosen_logratios - rejected_logratios))
-            losses = losses_chosen + losses_rejected
-
-        elif loss_type == "discopop":
-            # Eqn (5) of the DiscoPOP paper (https://huggingface.co/papers/2406.08414)
-            # This loss was discovered with LLM discovery
-            logratios = chosen_logps - rejected_logps
-            ref_logratios = ref_chosen_logps - ref_rejected_logps
-            logits = logratios - ref_logratios
-            logits = logits * self.beta
-            # Modulate the mixing coefficient based on the log ratio magnitudes
-            log_ratio_modulation = torch.sigmoid(logits / self.args.discopop_tau)
-            logistic_component = -F.logsigmoid(logits)
-            exp_component = torch.exp(-logits)
-            # Blend between logistic and exponential component based on log ratio modulation
-            losses = logistic_component * (1 - log_ratio_modulation) + exp_component * log_ratio_modulation
-
-        elif loss_type == "sft":
-            # SFT loss is the negative log likelihood loss on chosen responses
-            # This acts as the generation loss component in MPO
-            sft_loss = model_output["nll_loss"]
-            # Create losses tensor with same shape as other losses (per-sample)
-            batch_size = chosen_logps.shape[0]
-            losses = sft_loss.expand(batch_size)
-            # For SFT, we don't have preference rewards, so use zeros
-            chosen_rewards = torch.zeros_like(chosen_logps)
-            rejected_rewards = torch.zeros_like(rejected_logps)
-
-        else:
-            raise ValueError(
-                f"Unknown loss type: {self.loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'exo_pair', "
-                "'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_pair', 'discopop', 'apo_zero', "
-                "'apo_down', 'sft']"
-            )
-
-        chosen_rewards = self.beta * (chosen_logps.to(device) - ref_chosen_logps.to(device)).detach()
-        rejected_rewards = self.beta * (rejected_logps.to(device) - ref_rejected_logps.to(device)).detach()
-
-        return losses, chosen_rewards, rejected_rewards
-
-    def _compute_loss_liger(
-        self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]]
-    ) -> dict[str, torch.Tensor]:
-        unwrapped_model = self.accelerator.unwrap_model(model)
-        concatenated_batch = self.concatenated_inputs(batch, padding_value=self.pad_token_id)
-
-        model_kwargs = {}
-        if self.aux_loss_enabled:
-            model_kwargs["output_router_logits"] = True
-
-        # Add the pixel values and attention masks for vision models
-        if "pixel_values" in concatenated_batch:
-            model_kwargs["pixel_values"] = concatenated_batch["pixel_values"]
-        if "pixel_attention_mask" in concatenated_batch:
-            model_kwargs["pixel_attention_mask"] = concatenated_batch["pixel_attention_mask"]
-        if "image_sizes" in concatenated_batch:
-            model_kwargs["image_sizes"] = concatenated_batch["image_sizes"]
-        if "pixel_position_ids" in concatenated_batch:
-            model_kwargs["pixel_position_ids"] = concatenated_batch["pixel_position_ids"]
-        if "image_position_ids" in concatenated_batch:
-            model_kwargs["image_position_ids"] = concatenated_batch["image_position_ids"]
-        if "mm_token_type_ids" in concatenated_batch:
-            model_kwargs["mm_token_type_ids"] = concatenated_batch["mm_token_type_ids"]
-
-        prompt_attention_mask = concatenated_batch["prompt_attention_mask"]
-        completion_attention_mask = concatenated_batch["completion_attention_mask"]
-
-        if self.is_encoder_decoder:
-            # 1. Get encoder outputs
-            encoder_outputs = unwrapped_model.get_encoder()(
-                concatenated_batch["prompt_input_ids"],
-                attention_mask=concatenated_batch["prompt_attention_mask"],
-                return_dict=True,
-            )
-            # 2. Prepare decoder inputs
-            decoder_input_ids = shift_tokens_right(
-                concatenated_batch["completion_input_ids"],
-                unwrapped_model.config.decoder_start_token_id,
-            )
-            # 3. Get decoder outputs
-            decoder_outputs = unwrapped_model.get_decoder()(
-                input_ids=decoder_input_ids,
-                attention_mask=concatenated_batch["completion_attention_mask"],
-                encoder_hidden_states=encoder_outputs.last_hidden_state,
-                encoder_attention_mask=concatenated_batch["prompt_attention_mask"],
-                use_cache=False,
-            )
-            hidden_states = decoder_outputs.last_hidden_state
-
-            ref_hidden_states = None
-            if not self.reference_free and self.ref_model is not None:
-                unwrapped_ref_model = self.accelerator.unwrap_model(self.ref_model)
-                ref_encoder_outputs = unwrapped_ref_model.get_encoder()(
-                    concatenated_batch["prompt_input_ids"],
-                    attention_mask=concatenated_batch["prompt_attention_mask"],
-                    return_dict=True,
+                logratios_sorted, _ = torch.sort(logratios, dim=0)
+                ref_logratios_sorted, _ = torch.sort(ref_logratios, dim=0)
+                delta = logratios_sorted - ref_logratios_sorted
+                per_sequence_loss = (
+                    -F.logsigmoid(self.beta * delta) * (1 - self.label_smoothing)
+                    - F.logsigmoid(-self.beta * delta) * self.label_smoothing
                 )
-                ref_decoder_outputs = unwrapped_ref_model.get_decoder()(
-                    input_ids=decoder_input_ids,
-                    attention_mask=concatenated_batch["completion_attention_mask"],
-                    encoder_hidden_states=ref_encoder_outputs.last_hidden_state,
-                    encoder_attention_mask=concatenated_batch["prompt_attention_mask"],
-                    use_cache=False,
+
+            elif loss_type == "aot_unpaired":
+                chosen_logratios_sorted, _ = torch.sort(chosen_logratios, dim=0)
+                rejected_logratios_sorted, _ = torch.sort(rejected_logratios, dim=0)
+                delta = chosen_logratios_sorted - rejected_logratios_sorted
+                per_sequence_loss = (
+                    -F.logsigmoid(self.beta * delta) * (1 - self.label_smoothing)
+                    - F.logsigmoid(-self.beta * delta) * self.label_smoothing
                 )
-                ref_hidden_states = ref_decoder_outputs.last_hidden_state
-            elif not self.reference_free:
-                with self.null_ref_context():
-                    ref_encoder_outputs = unwrapped_model.get_encoder()(
-                        concatenated_batch["prompt_input_ids"],
-                        attention_mask=concatenated_batch["prompt_attention_mask"],
-                        return_dict=True,
-                    )
-                    ref_decoder_outputs = unwrapped_model.get_decoder()(
-                        input_ids=decoder_input_ids,
-                        attention_mask=concatenated_batch["completion_attention_mask"],
-                        encoder_hidden_states=ref_encoder_outputs.last_hidden_state,
-                        encoder_attention_mask=concatenated_batch["prompt_attention_mask"],
-                        use_cache=False,
-                    )
-                    ref_hidden_states = ref_decoder_outputs.last_hidden_state
 
-            labels = concatenated_batch["completion_input_ids"]
-            loss_mask = completion_attention_mask.bool()
-        else:
-            # For decoder-only models
-            input_ids = torch.cat(
-                (concatenated_batch["prompt_input_ids"], concatenated_batch["completion_input_ids"]), dim=1
-            )
-            attention_mask = torch.cat(
-                (concatenated_batch["prompt_attention_mask"], concatenated_batch["completion_attention_mask"]),
-                dim=1,
-            )
-            # Mask the prompt but not the completion for the loss
-            loss_mask = torch.cat(
-                (torch.zeros_like(prompt_attention_mask), completion_attention_mask),
-                dim=1,
-            )
+            elif loss_type == "apo_zero":
+                # Eqn (7) of the APO paper (https://huggingface.co/papers/2408.06266)
+                # Use this loss when you believe the chosen outputs are better than your model's default output
+                # Increase chosen likelihood and decrease rejected likelihood
+                losses_chosen = 1 - torch.sigmoid(self.beta * chosen_logratios)
+                losses_rejected = torch.sigmoid(self.beta * rejected_logratios)
+                per_sequence_loss = losses_chosen + losses_rejected
 
-            # Flush and truncate
-            if self.max_length is not None and self.max_length < attention_mask.size(1):
-                if self.truncation_mode == "keep_start":
-                    # Flush left to reduce the memory usage
-                    # [[0, 0, x, x, x, x],  ->  [[x, x, x, x],
-                    #  [0, x, x, x, 0, 0]]       [x, x, x, 0]]
-                    attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
-                    attention_mask = attention_mask[:, : self.max_length]
-                    input_ids = input_ids[:, : self.max_length]
-                    loss_mask = loss_mask[:, : self.max_length]
-                elif self.truncation_mode == "keep_end":
-                    # Flush right before truncating left, then flush left
-                    # [[0, 0, x, x, x, x],  ->  [[0, 0, x, x],
-                    #  [0, x, x, x, 0, 0]]       [0, x, x, x]]
-                    attention_mask, input_ids, loss_mask = flush_right(attention_mask, input_ids, loss_mask)
-                    input_ids = input_ids[:, -self.max_length :]
-                    attention_mask = attention_mask[:, -self.max_length :]
-                    loss_mask = loss_mask[:, -self.max_length :]
-                    attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
-                else:
-                    raise ValueError(
-                        f"Unknown truncation mode: '{self.truncation_mode}'. Should be one of ['keep_end', "
-                        "'keep_start']."
-                    )
-            else:
-                # Flush left to reduce the memory usage
-                # [[0, 0, x, x, x, x],  ->  [[x, x, x, x],
-                #  [0, x, x, x, 0, 0]]       [x, x, x, 0]]
-                attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
+            elif loss_type == "apo_down":
+                # Eqn (8) of the APO paper (https://huggingface.co/papers/2408.06266)
+                # Use this loss when you believe the chosen outputs are worse than your model's default output.
+                # Decrease chosen likelihood and decrease rejected likelihood more
+                losses_chosen = torch.sigmoid(self.beta * chosen_logratios)
+                losses_rejected = 1 - torch.sigmoid(self.beta * (chosen_logratios - rejected_logratios))
+                per_sequence_loss = losses_chosen + losses_rejected
 
-            # Add logits_to_keep optimization
-            if self.use_logits_to_keep:
-                first_compute_index = loss_mask.nonzero(as_tuple=True)[1].min()
-                logits_to_keep = (loss_mask.shape[1] - first_compute_index).item() + 1
-                model_kwargs["logits_to_keep"] = logits_to_keep
-
-            model_kwargs["output_hidden_states"] = True
-
-            # Add padding-free training support
-            if self.padding_free:
-                input_ids = input_ids[attention_mask.bool()].unsqueeze(0)
-                loss_mask = loss_mask[attention_mask.bool()].unsqueeze(0)
-                position_ids = attention_mask.cumsum(1)[attention_mask.bool()].unsqueeze(0) - 1
-                model_kwargs["position_ids"] = position_ids
-            else:
-                model_kwargs["attention_mask"] = attention_mask
-
-            # Get the base model outputs (before LM head)
-            if hasattr(unwrapped_model, "get_decoder") and unwrapped_model.get_decoder() is not None:
-                base_model = unwrapped_model.get_decoder()
-            else:
-                base_attr = getattr(unwrapped_model, "base_model_prefix", self.args.base_model_attribute_name)
-                base_model = getattr(unwrapped_model, base_attr, unwrapped_model)
-
-            outputs = base_model(
-                input_ids,
-                use_cache=False,
-                **model_kwargs,
-            )
-            hidden_states = outputs.last_hidden_state[:, :-1]
-
-            # Get reference hidden states if needed
-            ref_hidden_states = None
-            if not self.reference_free and self.ref_model is not None:
-                unwrapped_ref_model = self.accelerator.unwrap_model(self.ref_model)
-                if hasattr(unwrapped_ref_model, "get_decoder") and unwrapped_ref_model.get_decoder() is not None:
-                    ref_base_model = unwrapped_ref_model.get_decoder()
-                else:
-                    ref_attr = getattr(unwrapped_ref_model, "base_model_prefix", self.args.base_model_attribute_name)
-                    ref_base_model = getattr(unwrapped_ref_model, ref_attr, unwrapped_ref_model)
-
-                ref_outputs = ref_base_model(
-                    input_ids,
-                    use_cache=False,
-                    **model_kwargs,
+            elif loss_type == "discopop":
+                # Eqn (5) of the DiscoPOP paper (https://huggingface.co/papers/2406.08414)
+                logits = delta_score * self.beta
+                # Modulate the mixing coefficient based on the log ratio magnitudes
+                log_ratio_modulation = torch.sigmoid(logits / self.args.discopop_tau)
+                logistic_component = -F.logsigmoid(logits)
+                exp_component = torch.exp(-logits)
+                # Blend between logistic and exponential component based on log ratio modulation
+                per_sequence_loss = (
+                    logistic_component * (1 - log_ratio_modulation) + exp_component * log_ratio_modulation
                 )
-                ref_hidden_states = ref_outputs.last_hidden_state[:, :-1]
-            elif not self.reference_free:
-                if hasattr(unwrapped_model, "get_decoder") and unwrapped_model.get_decoder() is not None:
-                    ref_base_model = unwrapped_model.get_decoder()
-                else:
-                    ref_attr = getattr(unwrapped_model, "base_model_prefix", self.args.base_model_attribute_name)
-                    ref_base_model = getattr(unwrapped_model, ref_attr, unwrapped_model)
-                with self.null_ref_context():
-                    ref_outputs = ref_base_model(
-                        input_ids,
-                        use_cache=False,
-                        **model_kwargs,
-                    )
-                    ref_hidden_states = ref_outputs.last_hidden_state[:, :-1]
 
-            masked_input_ids = torch.where(loss_mask != 0, input_ids, self.label_pad_token_id)
-            labels = masked_input_ids[:, 1:]  # Shift right for casual LM
+            elif loss_type == "sft":
+                chosen_mask, _ = shift_completion_mask.chunk(2, dim=0)
+                chosen_per_token_logps, _ = per_token_logps.chunk(2, dim=0)
+                batch_loss = -chosen_per_token_logps[chosen_mask.bool()].mean()
+                batch_size = chosen_per_token_logps.size(0)
+                # Implementation convenience: expand the scalar SFT loss to a per-sequence tensor so it matches the
+                # shape of other losses; only the mean is used, so this is a no-op numerically.
+                per_sequence_loss = batch_loss.expand(batch_size)
 
-        # Get the LM head
-        lm_head = unwrapped_model.get_output_embeddings()
+            elif loss_type == "sigmoid_norm":
+                chosen_mask, rejected_mask = completion_mask.chunk(2, dim=0)
+                chosen_avg_score = chosen_scores / chosen_mask.sum(dim=1).clamp(min=1.0)
+                rejected_avg_score = rejected_scores / rejected_mask.sum(dim=1).clamp(min=1.0)
+                delta = chosen_avg_score - rejected_avg_score
+                per_sequence_loss = -F.logsigmoid(self.beta * delta)
 
-        # Get reference model weights if needed
-        ref_weight = None
-        ref_bias = None
-        if not self.reference_free:
-            if self.ref_model is not None:
-                unwrapped_ref_model = self.accelerator.unwrap_model(self.ref_model)
-                ref_lm_head = unwrapped_ref_model.get_output_embeddings()
             else:
-                with self.null_ref_context():
-                    ref_lm_head = unwrapped_model.get_output_embeddings()
-            ref_weight = ref_lm_head.weight
-            ref_bias = ref_lm_head.bias if hasattr(ref_lm_head, "bias") else None
+                raise ValueError(
+                    f"Unknown loss type: {loss_type}. Should be one of ['sigmoid', 'hinge', 'ipo', 'exo_pair', "
+                    "'nca_pair', 'robust', 'bco_pair', 'sppo_hard', 'aot', 'aot_unpaired', 'apo_zero', 'apo_down', "
+                    "'discopop', 'sft', 'sigmoid_norm']"
+                )
 
-        # Compute loss using Liger kernel
-        loss_output = self.dpo_loss_fn(
-            lm_head.weight,
-            hidden_states,
-            labels,
-            bias=lm_head.bias if hasattr(lm_head, "bias") else None,
-            ref_input=ref_hidden_states if not self.reference_free else None,
-            ref_weight=ref_weight if not self.reference_free else None,
-            ref_bias=ref_bias if not self.reference_free else None,
-        )
-        (
-            loss,
-            (chosen_logps, rejected_logps, chosen_logits_mean, rejected_logits_mean, nll_loss, *aux_outputs),
-        ) = loss_output
-
-        output = {
-            "loss": loss,
-            "chosen_logps": chosen_logps,
-            "rejected_logps": rejected_logps,
-            "mean_chosen_logits": chosen_logits_mean,
-            "mean_rejected_logits": rejected_logits_mean,
-            "nll_loss": nll_loss,
-            "chosen_rewards": aux_outputs[0],
-            "rejected_rewards": aux_outputs[1],
-        }
-        if self.aux_loss_enabled:
-            output["aux_loss"] = outputs.aux_loss
-
-        return output
-
-    def concatenated_forward(
-        self, model: nn.Module, batch: dict[str, Union[list, torch.LongTensor]], is_ref_model: bool = False
-    ) -> dict[str, torch.Tensor]:
-        """
-        Runs the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
-
-        We do this to avoid doing two forward passes, because it's faster for FSDP.
-
-        Args:
-            model:
-                Model to run the forward pass on.
-            batch:
-                Batch of input data.
-            is_ref_model:
-                Whether this method is being called for the reference model. If `True`, length desensitization is not
-                applied.
-        """
-        num_examples = batch["prompt_input_ids"].shape[0]
-
-        concatenated_batch = self.concatenated_inputs(batch, padding_value=self.pad_token_id)
-
-        model_kwargs = {"use_cache": False}
-        if self.aux_loss_enabled:
-            model_kwargs["output_router_logits"] = True
-
-        # Add the pixel values and attention masks for vision models
-        if "pixel_values" in concatenated_batch:
-            model_kwargs["pixel_values"] = concatenated_batch["pixel_values"]
-        if "pixel_attention_mask" in concatenated_batch:
-            model_kwargs["pixel_attention_mask"] = concatenated_batch["pixel_attention_mask"]
-        if "image_sizes" in concatenated_batch:
-            model_kwargs["image_sizes"] = concatenated_batch["image_sizes"]
-        if "pixel_position_ids" in concatenated_batch:
-            model_kwargs["pixel_position_ids"] = concatenated_batch["pixel_position_ids"]
-        if "image_position_ids" in concatenated_batch:
-            model_kwargs["image_position_ids"] = concatenated_batch["image_position_ids"]
-        if "mm_token_type_ids" in concatenated_batch:
-            model_kwargs["mm_token_type_ids"] = concatenated_batch["mm_token_type_ids"]
-
-        prompt_input_ids = concatenated_batch["prompt_input_ids"]
-        prompt_attention_mask = concatenated_batch["prompt_attention_mask"]
-        completion_input_ids = concatenated_batch["completion_input_ids"]
-        completion_attention_mask = concatenated_batch["completion_attention_mask"]
-        if self.is_encoder_decoder:
-            labels = completion_input_ids
-            labels[completion_attention_mask == 0] = self.label_pad_token_id
-            outputs = model(
-                input_ids=prompt_input_ids,
-                attention_mask=prompt_attention_mask,
-                labels=labels,  # we need the labels for the logits to be returned
-                **model_kwargs,
-            )
-            logits = outputs.logits
-            loss_mask = completion_attention_mask.bool()
-        else:
-            # Concatenate the prompt and completion inputs
-            input_ids = torch.cat((prompt_input_ids, completion_input_ids), dim=1)
-            attention_mask = torch.cat((prompt_attention_mask, completion_attention_mask), dim=1)
-            if "token_type_ids" in concatenated_batch:
-                prompt_token_type_ids = concatenated_batch["token_type_ids"]
-                token_type_ids = pad_to_length(prompt_token_type_ids, input_ids.shape[1], 0)
-            # Mask the prompt but not the completion for the loss
-            loss_mask = torch.cat(
-                (torch.zeros_like(prompt_attention_mask), completion_attention_mask),
-                dim=1,
-            )
-
-            # Flush and truncate
-            if self.max_length is not None and self.max_length < attention_mask.size(1):
-                if self.truncation_mode == "keep_start":
-                    # Flush left to reduce the memory usage
-                    # [[0, 0, x, x, x, x],  ->  [[x, x, x, x],
-                    #  [0, x, x, x, 0, 0]]       [x, x, x, 0]]
-                    if "token_type_ids" in concatenated_batch:
-                        attention_mask, input_ids, loss_mask, token_type_ids = flush_left(
-                            attention_mask, input_ids, loss_mask, token_type_ids
-                        )
-                    else:
-                        attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
-                    attention_mask = attention_mask[:, : self.max_length]
-                    input_ids = input_ids[:, : self.max_length]
-                    loss_mask = loss_mask[:, : self.max_length]
-                elif self.truncation_mode == "keep_end":
-                    # Flush right before truncating left, then flush left
-                    # [[0, 0, x, x, x, x],  ->  [[0, 0, x, x],
-                    #  [0, x, x, x, 0, 0]]       [0, x, x, x]]
-                    if "token_type_ids" in concatenated_batch:
-                        attention_mask, input_ids, loss_mask, token_type_ids = flush_left(
-                            attention_mask, input_ids, loss_mask, token_type_ids
-                        )
-                        token_type_ids = token_type_ids[:, -self.max_length :]
-                    else:
-                        attention_mask, input_ids, loss_mask = flush_right(attention_mask, input_ids, loss_mask)
-                    input_ids = input_ids[:, -self.max_length :]
-                    attention_mask = attention_mask[:, -self.max_length :]
-                    loss_mask = loss_mask[:, -self.max_length :]
-                    if "token_type_ids" in concatenated_batch:
-                        attention_mask, input_ids, loss_mask, token_type_ids = flush_left(
-                            attention_mask, input_ids, loss_mask, token_type_ids
-                        )
-                    else:
-                        attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
-                else:
-                    raise ValueError(
-                        f"Unknown truncation mode: '{self.truncation_mode}'. Should be one of ['keep_end', "
-                        "'keep_start']."
-                    )
-            else:
-                # Flush left to reduce the memory usage
-                # [[0, 0, x, x, x, x],  ->  [[x, x, x, x],
-                #  [0, x, x, x, 0, 0]]       [x, x, x, 0]]
-                if "token_type_ids" in concatenated_batch:
-                    attention_mask, input_ids, loss_mask, token_type_ids = flush_left(
-                        attention_mask, input_ids, loss_mask, token_type_ids
-                    )
-                else:
-                    attention_mask, input_ids, loss_mask = flush_left(attention_mask, input_ids, loss_mask)
-
-            if "token_type_ids" in concatenated_batch:
-                model_kwargs["token_type_ids"] = token_type_ids
-
-            if self.use_logits_to_keep:
-                # Compute logits_to_keep based on loss_mask pattern:
-                # [[0, 0, 0, x, x, x, x],
-                #  [0, 0, 0, x, x, x, 0]]
-                #         ^ start computing logits from here ([:, -(7-3+1):])
-                first_compute_index = loss_mask.nonzero(as_tuple=True)[1].min()
-                logits_to_keep = (loss_mask.shape[1] - first_compute_index).item() + 1  # +1 for the first label
-                model_kwargs["logits_to_keep"] = logits_to_keep
-
-            model_kwargs["output_hidden_states"] = True
-
-            if self.padding_free:
-                # Flatten the input_ids, position_ids, and loss_mask
-                # input_ids = [[a, b, c, 0], ->     input_ids = [[a, b, c, d, e, f, g]]
-                #              [d, e, f, g]]     position_ids = [[0, 1, 2, 0, 1, 2, 3]]
-                input_ids = input_ids[attention_mask.bool()].unsqueeze(0)
-                loss_mask = loss_mask[attention_mask.bool()].unsqueeze(0)
-                position_ids = attention_mask.cumsum(1)[attention_mask.bool()].unsqueeze(0) - 1
-                model_kwargs["position_ids"] = position_ids
-            else:
-                model_kwargs["attention_mask"] = attention_mask
-
-            outputs = model(input_ids, **model_kwargs)
-            logits = outputs.logits
-
-            # Offset the logits by one to align with the labels
-            labels = torch.roll(input_ids, shifts=-1, dims=1)
-            loss_mask = torch.roll(loss_mask, shifts=-1, dims=1).bool()
-
-            if self.use_logits_to_keep:
-                # Align labels with logits
-                # logits:    -,  -, [x2, x3, x4, x5, x6]
-                #                     ^ --------- ^       after logits[:, :-1, :]
-                # labels:   [y0, y1, y2, y3, y4, y5, y6]
-                #                         ^ --------- ^   with logits_to_keep=4, [:, -4:]
-                # loss_mask: [0,  0,  0,  1,  1,  1,  1]
-                labels = labels[:, -logits_to_keep:]
-                loss_mask = loss_mask[:, -logits_to_keep:]
-
-        if logits.shape[:2] != labels.shape[:2]:
-            # for LLaVA, the returned logits include the image tokens (placed before the text tokens)
-            seq_len = labels.shape[1]
-            logits = logits[:, -seq_len:]
-
-        # Compute the log probabilities of the labels
-        labels[~loss_mask] = 0  # dummy token; we'll ignore the losses on these tokens later
-        per_token_logps = selective_log_softmax(logits, labels)
-        per_token_logps[~loss_mask] = 0
-        per_token_logps = torch.roll(per_token_logps, shifts=1, dims=1)
-
-        if self.padding_free:
-            # Unflatten the per_token_logps (shape: [1, sum_seq_len] -> [batch_size, seq_len])
-            batch_size, seq_len = attention_mask.shape
-            per_token_logps_ = torch.zeros(
-                batch_size, seq_len, device=outputs.logits.device, dtype=outputs.logits.dtype
-            )
-            per_token_logps_[attention_mask.bool()] = per_token_logps
-            per_token_logps = per_token_logps_
-
-        all_logps = per_token_logps[:, 1:].sum(-1)
-
-        output = {}
-
-        if self.use_weighting:
-            with torch.no_grad():
+            if self.use_weighting:
                 # Eq (2) of the WPO paper: https://huggingface.co/papers/2406.11827
-                logprobs = F.log_softmax(logits, dim=-1)
-                weights_adjustment_factor = torch.logsumexp(2 * logprobs, dim=-1)  # same as sum(probs**2) in log space
-                per_token_logps_adjusted = per_token_logps - weights_adjustment_factor
-                all_weights = (per_token_logps_adjusted * loss_mask).sum(-1) / loss_mask.sum(-1)
-                chosen_weights = all_weights[:num_examples]
-                rejected_weights = all_weights[num_examples:]
-                output["policy_weights"] = torch.clamp(torch.exp(chosen_weights + rejected_weights), max=1)
+                completion_lengths = shift_completion_mask.sum(dim=1).clamp_min(1)
+                with torch.no_grad():
+                    aligned_logps = (per_token_logps - outputs.log_sum_sq_probs[:, -seq_len:]) * shift_completion_mask
+                mean_logps = aligned_logps.sum(dim=1) / completion_lengths
+                weights = torch.exp(mean_logps)
+                chosen_weights, rejected_weights = weights.chunk(2, dim=0)
+                per_sequence_loss *= chosen_weights * rejected_weights
 
-        if self.args.rpo_alpha is not None or "sft" in self.loss_type:
-            # Only use the chosen logits for the RPO loss or SFT loss
-            chosen_logits = logits[:num_examples, :-1] if not self.is_encoder_decoder else logits[:num_examples]
-            chosen_labels = labels[:num_examples, :-1] if not self.is_encoder_decoder else labels[:num_examples]
-
-            # Compute the log probabilities of the labels
-            output["nll_loss"] = F.cross_entropy(
-                torch.flatten(chosen_logits, end_dim=1), torch.flatten(chosen_labels, end_dim=1), ignore_index=0
-            )
-
-        if "ipo" in self.loss_type:
-            all_logps = all_logps / loss_mask.sum(-1)
-
-        if self.args.ld_alpha is not None and not is_ref_model:
-            # Compute response lengths based on loss_mask
-            completion_lengths = loss_mask.sum(dim=1)
-
-            chosen_lengths = completion_lengths[:num_examples]
-            rejected_lengths = completion_lengths[num_examples:]
-            public_lengths = torch.min(chosen_lengths, rejected_lengths)  # l_p in the paper
-            public_lengths = torch.cat([public_lengths, public_lengths], dim=0)
-
-            seq_len = per_token_logps.size(1)
-            position_ids = torch.arange(seq_len, device=per_token_logps.device).expand_as(per_token_logps)
-
-            ld_mask = position_ids < public_lengths.unsqueeze(1)
-            mask = position_ids < completion_lengths.unsqueeze(1)
-
-            front_mask = (ld_mask & mask).float()
-            rear_mask = (~ld_mask & mask).float()
-            front_logps = (per_token_logps * front_mask).sum(dim=1)
-            rear_logps = (per_token_logps * rear_mask).sum(dim=1)
-
-            all_logps = front_logps + self.args.ld_alpha * rear_logps
-
-        output["chosen_logps"] = all_logps[:num_examples]
-        output["rejected_logps"] = all_logps[num_examples:]
-
-        # Compute the mean logits
-        if self.padding_free:
-            # position_ids contains a sequence of range identifiers (e.g., [[0, 1, 2, 0, 1, 2, 3, ...]]).
-            # There are 2*num_examples ranges in total: the first half corresponds to the chosen tokens,
-            # and the second half to the rejected tokens.
-            # To find the start of the rejected tokens, we look for the num_examples+1-th zero in pos_id.
-            split_idx = (position_ids == 0).nonzero(as_tuple=True)[1][num_examples]
-            mean_chosen_logits = logits[0, :split_idx][loss_mask[0, :split_idx]].mean()
-            mean_rejected_logits = logits[0, split_idx:][loss_mask[0, split_idx:]].mean()
-        else:
-            mean_chosen_logits = logits[:num_examples][loss_mask[:num_examples]].mean()
-            mean_rejected_logits = logits[num_examples:][loss_mask[num_examples:]].mean()
-
-        output["mean_chosen_logits"] = mean_chosen_logits
-        output["mean_rejected_logits"] = mean_rejected_logits
+            loss += per_sequence_loss.mean() * loss_weight
 
         if self.aux_loss_enabled:
-            output["aux_loss"] = outputs.aux_loss
+            aux_loss = outputs.aux_loss
+            loss = loss + self.router_aux_loss_coef * aux_loss
+            self._metrics[mode]["aux_loss"].append(self.accelerator.gather_for_metrics(aux_loss).mean().item())
 
-        return output
+        # Log the metrics
+        # Entropy
+        per_token_entropy = outputs.entropy[:, -seq_len:].detach()
+        mask = shift_completion_mask
+        entropy_sum = (per_token_entropy * mask).sum()
+        total_tokens = mask.sum()
 
-    def get_batch_loss_metrics(
-        self,
-        model: Union[PreTrainedModel, nn.Module],
-        batch: dict[str, Union[list, torch.LongTensor]],
-        train_eval: Literal["train", "eval"] = "train",
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute the DPO loss and other metrics for the given batch of inputs for train or test."""
-        metrics = {}
+        # Gather counts across ranks and weight-average
+        entropy_sum = self.accelerator.gather_for_metrics(entropy_sum).sum()
+        total_tokens = self.accelerator.gather_for_metrics(total_tokens).sum()
+        entropy = (entropy_sum / total_tokens).item() if total_tokens > 0 else 0.0
+        self._metrics[mode]["entropy"].append(entropy)
 
-        if self.args.use_liger_loss:
-            model_output = self._compute_loss_liger(model, batch)
-            losses = model_output["loss"]
-            chosen_rewards = model_output["chosen_rewards"]
-            rejected_rewards = model_output["rejected_rewards"]
-        else:
-            model_output = self.concatenated_forward(model, batch)
+        # Number of tokens
+        if mode == "train":
+            num_tokens_in_batch = self.accelerator.gather_for_metrics(inputs["attention_mask"].sum()).sum().item()
+            self._total_train_tokens += num_tokens_in_batch // self._tp_size
+        self._metrics[mode]["num_tokens"] = [self._total_train_tokens]
 
-            # if ref_chosen_logps and ref_rejected_logps in batch use them, otherwise use the reference model
-            if "ref_chosen_logps" in batch and "ref_rejected_logps" in batch:
-                ref_chosen_logps = batch["ref_chosen_logps"]
-                ref_rejected_logps = batch["ref_rejected_logps"]
-            else:
-                ref_chosen_logps, ref_rejected_logps = self.compute_ref_log_probs(batch)
+        # Average logits for chosen and rejected completions
+        chosen_mean_logits, rejected_mean_logits = outputs.mean_logits[:, -seq_len:].chunk(2, dim=0)
+        chosen_mask, rejected_mask = shift_completion_mask.chunk(2, dim=0)
+        total_chosen_logits = chosen_mean_logits[chosen_mask.bool()].sum()
+        total_chosen_tokens = chosen_mask.sum()
+        total_rejected_logits = rejected_mean_logits[rejected_mask.bool()].sum()
+        total_rejected_tokens = rejected_mask.sum()
+        total_chosen_logits = self.accelerator.gather_for_metrics(total_chosen_logits).sum().item()
+        total_chosen_tokens = self.accelerator.gather_for_metrics(total_chosen_tokens).sum().item()
+        total_rejected_logits = self.accelerator.gather_for_metrics(total_rejected_logits).sum().item()
+        total_rejected_tokens = self.accelerator.gather_for_metrics(total_rejected_tokens).sum().item()
+        avg_chosen_logits = total_chosen_logits / total_chosen_tokens if total_chosen_tokens > 0 else 0.0
+        avg_rejected_logits = total_rejected_logits / total_rejected_tokens if total_rejected_tokens > 0 else 0.0
+        self._metrics[mode]["logits/chosen"].append(avg_chosen_logits)
+        self._metrics[mode]["logits/rejected"].append(avg_rejected_logits)
 
-            # Initialize combined losses
-            losses = 0
-            chosen_rewards = 0
-            rejected_rewards = 0
+        # Token accuracy for the chosen completions
+        chosen_is_top1, _ = outputs.is_top1[:, -seq_len:].chunk(2, dim=0)
+        correct_predictions = chosen_is_top1 & chosen_mask.bool()
+        total_tokens = chosen_mask.sum()
+        correct_tokens = correct_predictions.sum()
+        correct_tokens = self.accelerator.gather_for_metrics(correct_tokens)
+        total_tokens = self.accelerator.gather_for_metrics(total_tokens)
+        total_sum = total_tokens.sum()
+        accuracy = (correct_tokens.sum() / total_sum).item() if total_sum > 0 else 0.0
+        self._metrics[mode]["mean_token_accuracy"].append(accuracy)
 
-            # Compute losses for each loss type
-            for idx, loss_type in enumerate(self.loss_type):
-                # Compute individual loss using standard DPO loss function
-                _losses, _chosen_rewards, _rejected_rewards = self.dpo_loss(
-                    model_output["chosen_logps"],
-                    model_output["rejected_logps"],
-                    ref_chosen_logps,
-                    ref_rejected_logps,
-                    loss_type,
-                    model_output,
-                )
+        # Rewards for chosen and rejected completions
+        chosen_rewards = self.beta * chosen_logratios.detach()
+        rejected_rewards = self.beta * rejected_logratios.detach()
+        agg_chosen_rewards = self.accelerator.gather(chosen_rewards)
+        agg_rejected_rewards = self.accelerator.gather(rejected_rewards)
+        self._metrics[mode]["rewards/chosen"].append(agg_chosen_rewards.mean().item())
+        self._metrics[mode]["rewards/rejected"].append(agg_rejected_rewards.mean().item())
 
-                # Add weighted contributions
-                weight = self.loss_weights[idx] if self.loss_weights else 1.0
-                losses = losses + _losses * weight
-                chosen_rewards = chosen_rewards + _chosen_rewards * weight
-                rejected_rewards = rejected_rewards + _rejected_rewards * weight
-
+        # Reward accuracy
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
+        agg_reward_accuracies = self.accelerator.gather(reward_accuracies)
+        self._metrics[mode]["rewards/accuracies"].append(agg_reward_accuracies.mean().item())
 
-        if self.args.rpo_alpha is not None:
-            losses = losses + self.args.rpo_alpha * model_output["nll_loss"]  # RPO loss from V3 of the paper
+        # Reward margins
+        margins = chosen_rewards - rejected_rewards
+        agg_margins = self.accelerator.gather(margins)
+        self._metrics[mode]["rewards/margins"].append(agg_margins.mean().item())
 
-        if self.use_weighting:
-            losses = losses * model_output["policy_weights"]
-
-        if self.aux_loss_enabled:
-            losses = losses + self.aux_loss_coef * model_output["aux_loss"]
-
-        prefix = "eval_" if train_eval == "eval" else ""
-        metrics[f"{prefix}rewards/chosen"] = self.accelerator.gather_for_metrics(chosen_rewards).mean().item()
-        metrics[f"{prefix}rewards/rejected"] = self.accelerator.gather_for_metrics(rejected_rewards).mean().item()
-        metrics[f"{prefix}rewards/accuracies"] = self.accelerator.gather_for_metrics(reward_accuracies).mean().item()
-        metrics[f"{prefix}rewards/margins"] = (
-            self.accelerator.gather_for_metrics(chosen_rewards - rejected_rewards).mean().item()
-        )
-        metrics[f"{prefix}logps/chosen"] = (
-            self.accelerator.gather_for_metrics(model_output["chosen_logps"]).detach().mean().item()
-        )
-        metrics[f"{prefix}logps/rejected"] = (
-            self.accelerator.gather_for_metrics(model_output["rejected_logps"]).detach().mean().item()
-        )
-        metrics[f"{prefix}logits/chosen"] = (
-            self.accelerator.gather_for_metrics(model_output["mean_chosen_logits"]).detach().mean().item()
-        )
-        metrics[f"{prefix}logits/rejected"] = (
-            self.accelerator.gather_for_metrics(model_output["mean_rejected_logits"]).detach().mean().item()
-        )
-        if self.args.rpo_alpha is not None or "sft" in self.loss_type:
-            metrics[f"{prefix}nll_loss"] = (
-                self.accelerator.gather_for_metrics(model_output["nll_loss"]).detach().mean().item()
-            )
-        if self.aux_loss_enabled:
-            metrics[f"{prefix}aux_loss"] = (
-                self.accelerator.gather_for_metrics(model_output["aux_loss"]).detach().mean().item()
-            )
-
-        return losses.mean(), metrics
-
-    def compute_loss(
-        self,
-        model: Union[PreTrainedModel, nn.Module],
-        inputs: dict[str, Union[torch.Tensor, Any]],
-        return_outputs=False,
-        num_items_in_batch=None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, dict[str, float]]]:
-        compute_loss_context_manager = (
-            autocast(self.accelerator.device.type) if self._peft_has_been_casted_to_bf16 else nullcontext()
-        )
-        with compute_loss_context_manager:
-            loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
-
-        # Make sure to move the loss to the device the original accumulating loss is at back in the `Trainer` class:
-        loss = loss.to(self.args.device)
-        # force log the metrics
-        self.store_metrics(metrics, train_eval="train")
+        # Average log probabilities for chosen and rejected completions
+        self._metrics[mode]["logps/chosen"].append(self.accelerator.gather(chosen_logps).mean().item())
+        self._metrics[mode]["logps/rejected"].append(self.accelerator.gather(rejected_logps).mean().item())
 
         if return_outputs:
-            return loss, metrics
-
-        return loss
-
-    def generate_from_model_and_ref(self, model, batch: dict[str, torch.LongTensor]) -> tuple[str, str]:
-        """Generate samples from the model and reference model for the given batch of inputs."""
-
-        # If one uses `generate_during_eval` with peft + bf16, we need to explicitly call generate with
-        # the torch amp context manager as some hidden states are silently casted to full precision.
-        generate_context_manager = (
-            autocast(self.accelerator.device.type) if self._peft_has_been_casted_to_bf16 else nullcontext()
-        )
-
-        with generate_context_manager:
-            policy_output = model.generate(
-                input_ids=batch["prompt_input_ids"],
-                attention_mask=batch["prompt_attention_mask"],
-                max_length=self.max_length,
-                do_sample=True,
-                pad_token_id=self.pad_token_id,
+            warnings.warn(
+                "`return_outputs=True`, and the logits it passes to `compute_metrics`, are deprecated and will be removed "
+                "in v2.0.0. The fused LM head does not build the logits, so they are recomputed with an extra forward pass.",
+                FutureWarning,
+                stacklevel=2,
             )
+            with torch.no_grad():
+                outputs = model(**model_kwargs)
+        return (loss, outputs) if return_outputs else loss
 
-            # if ref_output in batch use that otherwise use the reference model
-            if "ref_output" in batch:
-                ref_output = batch["ref_output"]
-            else:
-                if self.ref_model is None:
-                    with self.null_ref_context():
-                        ref_output = self.model.generate(
-                            input_ids=batch["prompt_input_ids"],
-                            attention_mask=batch["prompt_attention_mask"],
-                            max_length=self.max_length,
-                            do_sample=True,
-                            pad_token_id=self.pad_token_id,
-                        )
-                else:
-                    ref_output = self.ref_model.generate(
-                        input_ids=batch["prompt_input_ids"],
-                        attention_mask=batch["prompt_attention_mask"],
-                        max_length=self.max_length,
-                        do_sample=True,
-                        pad_token_id=self.pad_token_id,
-                    )
-
-        policy_output = pad_to_length(policy_output, self.max_length, self.pad_token_id)
-        policy_output_decoded = self.processing_class.batch_decode(policy_output, skip_special_tokens=True)
-
-        ref_output = pad_to_length(ref_output, self.max_length, self.pad_token_id)
-        ref_output_decoded = self.processing_class.batch_decode(ref_output, skip_special_tokens=True)
-
-        return policy_output_decoded, ref_output_decoded
-
-    def prediction_step(
+    def evaluate(
         self,
-        model: Union[PreTrainedModel, nn.Module],
-        inputs: dict[str, Union[torch.Tensor, Any]],
-        prediction_loss_only: bool,
-        ignore_keys: Optional[list[str]] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        if ignore_keys is None:
-            if hasattr(model, "config"):
-                ignore_keys = getattr(model.config, "keys_to_ignore_at_inference", [])
-            else:
-                ignore_keys = []
-
-        prediction_context_manager = (
-            autocast(self.accelerator.device.type) if self._peft_has_been_casted_to_bf16 else nullcontext()
-        )
-
-        with torch.no_grad(), prediction_context_manager:
-            loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
-
-        # force log the metrics
-        self.store_metrics(metrics, train_eval="eval")
-
-        if prediction_loss_only:
-            return loss.detach(), None, None
-
-        # logits for the chosen and rejected samples from model
-        logits_dict = {
-            "eval_logits/chosen": metrics["eval_logits/chosen"],
-            "eval_logits/rejected": metrics["eval_logits/rejected"],
-        }
-        logits = [v for k, v in logits_dict.items() if k not in ignore_keys]
-        logits = torch.tensor(logits, device=self.accelerator.device)
-        labels = torch.zeros(logits.shape[0], device=self.accelerator.device)
-
-        return (loss.detach(), logits, labels)
-
-    def store_metrics(self, metrics: dict[str, float], train_eval: Literal["train", "eval"] = "train") -> None:
-        for key, value in metrics.items():
-            self._stored_metrics[train_eval][key].append(value)
-
-    def evaluation_loop(
-        self,
-        dataloader: DataLoader,
-        description: str,
-        prediction_loss_only: Optional[bool] = None,
-        ignore_keys: Optional[list[str]] = None,
+        eval_dataset: Dataset
+        | IterableDataset
+        | DatasetDict
+        | IterableDatasetDict
+        | dict[str, Dataset | IterableDataset]
+        | None = None,
+        ignore_keys: list[str] | None = None,
         metric_key_prefix: str = "eval",
-    ) -> EvalLoopOutput:
-        """
-        Overriding built-in evaluation loop to store metrics for each batch. Prediction/evaluation loop, shared by
-        `Trainer.evaluate()` and `Trainer.predict()`.
-
-        Works both with or without labels.
-        """
-
-        # Sample and save to game log if requested (for one batch to save time)
-        if self.generate_during_eval:
-            # Generate random indices within the range of the total number of samples
-            num_samples = len(dataloader.dataset)
-            random_indices = random.sample(range(num_samples), k=self.args.eval_batch_size)
-
-            # Use dataloader.dataset.select to get the random batch without iterating over the DataLoader
-            random_batch_dataset = dataloader.dataset.select(random_indices)
-            random_batch = self.data_collator(random_batch_dataset)
-            random_batch = self._prepare_inputs(random_batch)
-
-            policy_output_decoded, ref_output_decoded = self.generate_from_model_and_ref(self.model, random_batch)
-
-            table = pd.DataFrame(
-                columns=["Prompt", "Policy", "Ref Model"],
-                data=[
-                    [prompt, pol[len(prompt) :], ref[len(prompt) :]]
-                    for prompt, pol, ref in zip(
-                        random_batch_dataset["prompt"], policy_output_decoded, ref_output_decoded
-                    )
-                ],
-            )
-            if "wandb" in self.args.report_to and self.accelerator.is_main_process:
-                wandb.log({"game_log": wandb.Table(data=table)})
-
-            if "comet_ml" in self.args.report_to:
-                log_table_to_comet_experiment(
-                    name="game_log.csv",
-                    table=table,
+    ) -> dict[str, float]:
+        # When a dataset is passed directly to `evaluate` (e.g. a held-out test set), preprocess it the same way
+        # `__init__` does, so that `evaluate` accepts the same dataset types as the trainer. `_prepare_dataset` is
+        # idempotent: it skips datasets that are already tokenized. A `str` selects a dataset that was already prepared
+        # at init time, so it's left untouched.
+        if not self._is_vision_dataset and eval_dataset is not None and not isinstance(eval_dataset, str):
+            # Full fine-tuning with no `ref_model` uses `self.model` as the reference, which is only valid before
+            # training. After a step (`global_step > 0`) it's the trained policy, so we can't precompute a correct
+            # reference here. (PEFT is exempt: the reference is recovered by disabling the adapter.) Checked before
+            # tokenizing so we fail fast.
+            if (
+                self.precompute_ref_logps
+                and self.ref_model is None
+                and not is_peft_model(self.model)
+                and self.state.global_step > 0
+            ):
+                raise ValueError(
+                    "Cannot compute reference log-probs for a dataset passed to `evaluate()` after training has "
+                    "started, because `precompute_ref_log_probs=True` and no `ref_model` was provided (full "
+                    "fine-tuning). In this setup the reference model is not kept in memory, so it is only available "
+                    "before training. Provide this dataset as `eval_dataset` at initialization, pass an explicit "
+                    "`ref_model`, or set `precompute_ref_log_probs=False`."
                 )
-
-            if "mlflow" in self.args.report_to and self.accelerator.is_main_process:
-                mlflow.log_table(data=table, artifact_file="game_log.json")
-
-        # Base evaluation
-        initial_output = super().evaluation_loop(
-            dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix
+            if isinstance(eval_dataset, dict):
+                eval_dataset = {
+                    key: self._prepare_dataset(dataset, self.processing_class, self.args, key)
+                    for key, dataset in eval_dataset.items()
+                }
+            else:
+                eval_dataset = self._prepare_dataset(eval_dataset, self.processing_class, self.args, "eval")
+            # With `precompute_ref_log_probs`, `_compute_loss` reads the reference log-probs from the batch, so they
+            # must be precomputed here as well, mirroring `__init__`.
+            if self.precompute_ref_logps:
+                batch_size = self.args.precompute_ref_batch_size or self.args.per_device_eval_batch_size
+                if isinstance(eval_dataset, dict):
+                    eval_dataset = {
+                        name: self._precompute_ref_logps(dataset, name, batch_size)
+                        for name, dataset in eval_dataset.items()
+                    }
+                else:
+                    eval_dataset = self._precompute_ref_logps(eval_dataset, "eval", batch_size)
+            # Call `super().evaluate()` once per split ourselves instead of handing the whole dict to it: `Trainer.evaluate`
+            # would otherwise recurse into `self.evaluate` per split, re-entering this override on an already-prepared dataset.
+            if isinstance(eval_dataset, dict):
+                metrics = {}
+                for name, dataset in eval_dataset.items():
+                    metrics.update(
+                        super().evaluate(
+                            eval_dataset=dataset,
+                            ignore_keys=ignore_keys,
+                            metric_key_prefix=f"{metric_key_prefix}_{name}",
+                        )
+                    )
+                return metrics
+        return super().evaluate(
+            eval_dataset=eval_dataset, ignore_keys=ignore_keys, metric_key_prefix=metric_key_prefix
         )
 
-        return initial_output
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        try:
+            return self._compute_loss(model, inputs, return_outputs)
+        except ValueError as e:
+            if "Image features and image tokens do not match" in str(e) and self.args.max_length is not None:
+                raise ValueError(
+                    f"The current `max_length` ({self.args.max_length}) is too short and causes image placeholder "
+                    f"tokens in `input_ids` to be truncated, while the corresponding image features remain intact. "
+                    f"Please increase `max_length` or set it to `None` to disable truncation."
+                ) from e
+            raise
 
-    def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
-        """
-        Log `logs` on the various objects watching training, including stored metrics.
+    # Override training step to add activation offloading context.
+    def training_step(self, *args, **kwargs):
+        with self.maybe_activation_offload_context:
+            return super().training_step(*args, **kwargs)
 
-        Args:
-            logs (`dict[str, float]`):
-                The values to log.
-            start_time (`float`, *optional*):
-                Start time of the training.
-        """
-        # logs either has 'loss' or 'eval_loss'
-        train_eval = "train" if "loss" in logs else "eval"
-        # Add averaged stored metrics to logs
-        for key, metrics in self._stored_metrics[train_eval].items():
-            logs[key] = torch.tensor(metrics).mean().item()
-        del self._stored_metrics[train_eval]
-        return super().log(logs, start_time)
+    def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
+        mode = "train" if self.model.training else "eval"
+        metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}  # average the metrics
+        # This method can be called both in training and evaluation. When called in evaluation, the keys in `logs`
+        # start with "eval_". We need to add the prefix "eval_" to the keys in `metrics` to match the format.
+        if mode == "eval":
+            metrics = {f"eval_{key}": val for key, val in metrics.items()}
+        logs.update(metrics)
+        super().log(logs, start_time)
+        self._metrics[mode].clear()
+
+    # During eval, Trainer calls prediction_step. If no labels are present in the inputs, it only runs forward and
+    # returns logits. We override prediction_step to force compute_loss, because this trainer doesn't involve labels.
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys: list[str] | None = None):
+        inputs = self._prepare_inputs(inputs)
+        with torch.no_grad(), self.compute_loss_context_manager():
+            if prediction_loss_only:
+                loss = self.compute_loss(model, inputs, return_outputs=False)
+                logits, labels = None, None
+            else:
+                loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+                logits, labels = outputs.logits, inputs["input_ids"]
+        return loss, logits, labels
 
     # Ensure the model card is saved along with the checkpoint
     def _save_checkpoint(self, model, trial):
@@ -2837,65 +2316,90 @@ class _UnslothDPOTrainer(BaseTrainer):
 class UnslothDPOTrainer(_UnslothDPOTrainer):
     """
     
-Trainer for Direct Preference Optimization (DPO) method.
+Trainer for Direct Preference Optimization (DPO) method. This algorithm was initially proposed in the paper [Direct
+Preference Optimization: Your Language Model is Secretly a Reward Model](https://huggingface.co/papers/2305.18290).
+This class is a wrapper around the [`~transformers.Trainer`] class and inherits all of its attributes and methods.
 
-This class is a wrapper around the [`transformers.Trainer`] class and inherits all of its attributes and methods.
+Example:
+
+```python
+>>> from trl import DPOTrainer
+>>> from datasets import load_dataset
+
+>>> dataset = load_dataset("trl-lib/ultrafeedback_binarized", split="train")
+
+>>> trainer = DPOTrainer(
+...     model="Qwen/Qwen2.5-0.5B-Instruct",
+...     train_dataset=dataset,
+... )
+>>> trainer.train()
+```
 
 Args:
-    model (`Union[str, PreTrainedModel]`):
+    model (`str` or [`~transformers.PreTrainedModel`] or [`~peft.PeftModel`]):
         Model to be trained. Can be either:
 
         - A string, being the *model id* of a pretrained model hosted inside a model repo on huggingface.co, or a
           path to a *directory* containing model weights saved using
           [`~transformers.PreTrainedModel.save_pretrained`], e.g., `'./my_model_directory/'`. The model is loaded
-          using [`~transformers.AutoModelForCausalLM.from_pretrained`] with the keyword arguments in
-          `args.model_init_kwargs`.
+          using `<ModelArchitecture>.from_pretrained` (where `<ModelArchitecture>` is derived from the model
+          config) with the keyword arguments in `args.model_init_kwargs`. If `dtype` is not specified in
+          `args.model_init_kwargs`, it defaults to `float32`. This differs from
+          [`~transformers.PreTrainedModel.from_pretrained`], where (since Transformers v5) the dtype is inferred
+          from the model config.
         - A [`~transformers.PreTrainedModel`] object. Only causal language models are supported.
-    ref_model ([`PreTrainedModelWrapper`]):
-        Hugging Face transformer model with a casual language modelling head. Used for implicit reward computation
-        and loss. If no reference model is provided, the trainer will create a reference model with the same
-        architecture as the model to be optimized.
+        - A [`~peft.PeftModel`] object. Only causal language models are supported.
+    ref_model ([`~transformers.PreTrainedModel`], *optional*):
+        Reference model used to compute the reference log probabilities.
+
+        - If provided, this model is used directly as the reference policy.
+        - If `None`, the trainer will automatically use the initial policy corresponding to `model`, i.e. the model
+          state before DPO training starts.
     args ([`DPOConfig`], *optional*):
         Configuration for this trainer. If `None`, a default configuration is used.
     data_collator ([`~transformers.DataCollator`], *optional*):
         Function to use to form a batch from a list of elements of the processed `train_dataset` or `eval_dataset`.
-        Will default to [`DataCollatorForPreference`].
+        Will default to [`~trainer.dpo_trainer.DataCollatorForPreference`] if the model is a language model and
+        [`~trainer.dpo_trainer.DataCollatorForVisionPreference`] if the model is a vision-language model. Custom
+        collators must truncate sequences before padding; the trainer does not apply post-collation truncation.
     train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
-        Dataset to use for training. DPO supports [preference](#preference) type and. The format of the samples can
-        be either:
+        Dataset to use for training. This trainer supports both [language modeling](#language-modeling) type and
+        [prompt-completion](#prompt-completion) type. The format of the samples can be either:
 
         - [Standard](dataset_formats#standard): Each sample contains plain text.
         - [Conversational](dataset_formats#conversational): Each sample contains structured messages (e.g., role
           and content).
-    eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`] or `dict[str, Union[Dataset, IterableDataset]]`):
+
+        When `train_dataset` is an [`~datasets.IterableDataset`] (e.g. a streaming dataset), `max_steps` must be
+        set in the training arguments, since its length cannot be inferred and the total number of training steps
+        is required to bound the training loop and configure the learning rate scheduler.
+    eval_dataset ([`~datasets.Dataset`], [`~datasets.IterableDataset`], [`~datasets.DatasetDict`], [`~datasets.IterableDatasetDict`] or `dict[str, Dataset | IterableDataset]`):
         Dataset to use for evaluation. It must meet the same requirements as `train_dataset`.
-    processing_class ([`~transformers.PreTrainedTokenizerBase`], [`~transformers.BaseImageProcessor`], [`~transformers.FeatureExtractionMixin`] or [`~transformers.ProcessorMixin`], *optional*):
-        Processing class used to process the data. If `None`, the processing class is loaded from the model's name
-        with [`~transformers.AutoTokenizer.from_pretrained`].
+    processing_class ([`~transformers.PreTrainedTokenizerBase`] or [`~transformers.ProcessorMixin`], *optional*):
+        Processing class used to process the data. The padding side must be set to "left". If `None`, the
+        processing class is loaded from the model's name with [`~transformers.AutoProcessor.from_pretrained`]. A
+        padding token, `tokenizer.pad_token`, must be set. If the processing class has not set a padding token,
+        `tokenizer.eos_token` will be used as the default.
     compute_metrics (`Callable[[EvalPrediction], dict]`, *optional*):
-        The function that will be used to compute metrics at evaluation. Must take a [`EvalPrediction`] and return
-        a dictionary string to metric values. *Note* When passing TrainingArgs with `batch_eval_metrics` set to
-        `True`, your compute_metrics function must take a boolean `compute_result` argument. This will be triggered
-        after the last eval batch to signal that the function needs to calculate and return the global summary
-        statistics rather than accumulating the batch-level statistics.
+        The function that will be used to compute metrics at evaluation. Must take a
+        [`~transformers.EvalPrediction`] and return a dictionary string to metric values. When passing
+        [`SFTConfig`] with `batch_eval_metrics` set to `True`, your `compute_metrics` function must take a boolean
+        `compute_result` argument. This will be triggered after the last eval batch to signal that the function
+        needs to calculate and return the global summary statistics rather than accumulating the batch-level
+        statistics. The logits it receives are recomputed with an extra forward pass. This is deprecated and will
+        be removed in v2.0.0.
     callbacks (list of [`~transformers.TrainerCallback`], *optional*):
         List of callbacks to customize the training loop. Will add those to the list of default callbacks detailed
         in [here](https://huggingface.co/docs/transformers/main_classes/callback).
 
         If you want to remove one of the default callbacks used, use the [`~transformers.Trainer.remove_callback`]
         method.
-    optimizers (`tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]`, *optional*, defaults to `(None, None)`):
-        A tuple containing the optimizer and the scheduler to use. Will default to an instance of [`AdamW`] on your
-        model and a scheduler given by [`get_linear_schedule_with_warmup`] controlled by `args`.
-    optimizer_cls_and_kwargs (`Tuple[Type[torch.optim.Optimizer], Dict[str, Any]]`, *optional*):
-        A tuple containing the optimizer class and keyword arguments to use. Overrides `optim` and `optim_args` in
-        `args`. Incompatible with the `optimizers` argument.
-    preprocess_logits_for_metrics (`Callable[[torch.Tensor, torch.Tensor], torch.Tensor]`, *optional*):
-        A function that preprocess the logits right before caching them at each evaluation step. Must take two
-        tensors, the logits and the labels, and return the logits once processed as desired. The modifications made
-        by this function will be reflected in the predictions received by `compute_metrics`.
-
-        Note that the labels (second parameter) will be `None` if the dataset does not have them.
+    optimizers (`tuple[torch.optim.Optimizer | None, torch.optim.lr_scheduler.LambdaLR | None]`, *optional*, defaults to `(None, None)`):
+        A tuple containing the optimizer and the scheduler to use. Will default to an instance of `AdamW` on your
+        model and a scheduler given by [`~transformers.get_linear_schedule_with_warmup`] controlled by `args`.
+    quantization_config ([`~transformers.BitsAndBytesConfig`], *optional*):
+        Quantization configuration used when loading the model from a model identifier. Combine with `peft_config`
+        for QLoRA training. Ignored if the model is already instantiated.
     peft_config ([`~peft.PeftConfig`], *optional*):
         PEFT configuration used to wrap the model. If `None`, the model is not wrapped.
 
@@ -2911,8 +2415,7 @@ Args:
         processing_class = None,
         compute_metrics = None,
         callbacks = None,
-        optimizer_cls_and_kwargs = None,
-        preprocess_logits_for_metrics = None,
+        quantization_config = None,
         peft_config = None,
         **kwargs
     ):
@@ -2993,7 +2496,8 @@ Args:
                       '`pip install --upgrade --no-cache-dir --force-reinstall --no-deps unsloth transformers trl unsloth_zoo`')
         if getattr(args, 'eval_strategy', 'no') != 'no':
             eval_bsz = getattr(args, 'per_device_eval_batch_size', 8)
-            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz: args.per_device_eval_batch_size = args.per_device_train_batch_size
+            eval_generations = getattr(args, 'num_generations_eval', None) or getattr(args, 'num_generations', None) or 1
+            if eval_bsz == 8 and args.per_device_train_batch_size < eval_bsz and (args.per_device_train_batch_size * args.world_size) % eval_generations == 0: args.per_device_eval_batch_size = args.per_device_train_batch_size
             if getattr(args, 'eval_accumulation_steps', None) is None and ga_steps is not None: args.eval_accumulation_steps = ga_steps
         fp16_full_eval = getattr(args, 'fp16_full_eval', False)
         if type(fp16_full_eval) is not bool: fp16_full_eval = False
@@ -3010,11 +2514,6 @@ Args:
         elif not bf16_full_eval and not fp16_full_eval:
             args.bf16_full_eval = args.bf16
             args.fp16_full_eval = args.fp16
-        _output_logits = False
-        if locals().get('compute_metrics', None) is not None: _output_logits = True
-        if locals().get('preprocess_logits_for_metrics', None) is not None: _output_logits = True
-        if _output_logits:
-            os.environ['UNSLOTH_RETURN_LOGITS'] = '1'
         if model is not None:
             _warnings_issued = getattr(model, 'warnings_issued', None)
             if _warnings_issued is None:
@@ -3037,6 +2536,14 @@ Args:
                     print('Unsloth: You set `max_seq_length` as ' + str(args_max_seq_length) + ' but '
                            'the maximum the model supports is ' + str(model_max_seq_length) + '. We shall reduce it.')
                     args.max_seq_length = model_max_seq_length
+        _unsloth_model_msl = getattr(model, 'max_seq_length', None)
+        if isinstance(_unsloth_model_msl, int) and _unsloth_model_msl > 0 and hasattr(args, 'max_length'):
+            if args.max_length is None or args.max_length > _unsloth_model_msl:
+                print('Unsloth: `max_length = ' + str(args.max_length) + '` exceeds the model max_seq_length of ' + str(_unsloth_model_msl) + ', so it is reduced to ' + str(_unsloth_model_msl) + '.')
+                args.max_length = _unsloth_model_msl
+                _unsloth_mpl = getattr(args, 'max_prompt_length', 0)
+                if (_unsloth_mpl is None and args.max_length <= 128) or (_unsloth_mpl is not None and _unsloth_mpl >= args.max_length):
+                    args.max_prompt_length = args.max_length // 2
         if model is not None and hasattr(model, 'for_training'):
             _use_gc = model._unsloth_gradient_checkpointing if hasattr(model, '_unsloth_gradient_checkpointing') else getattr(args, 'gradient_checkpointing', True)
             model.for_training(use_gradient_checkpointing=_use_gc)
@@ -3047,14 +2554,14 @@ Args:
         __tokenizer = processing_class if 'processing_class' in locals() else tokenizer
         from unsloth_zoo.vision_utils import UnslothVisionDataCollator
         if not isinstance(data_collator, UnslothVisionDataCollator):
-            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in train_dataset.column_names:
+            if isinstance(data_collator, DataCollatorForSeq2Seq) and 'labels' not in _unsloth_dataset_column_names(train_dataset):
                 data_collator = TransformersDataCollatorForLanguageModeling(
                     __tokenizer,
                     mlm = False,
                     mlm_probability = 0.0,
                     pad_to_multiple_of = getattr(args, 'pad_to_multiple_of', None),
                 )
-            elif isinstance(data_collator, TransformersDataCollatorForLanguageModeling) and 'labels' in train_dataset.column_names:
+            elif isinstance(data_collator, TransformersDataCollatorForLanguageModeling) and 'labels' in _unsloth_dataset_column_names(train_dataset):
                 data_collator = DataCollatorForSeq2Seq(
                     __tokenizer,
                     pad_to_multiple_of = getattr(args, 'pad_to_multiple_of', None),
@@ -3146,8 +2653,7 @@ Args:
             processing_class = processing_class,
             compute_metrics = compute_metrics,
             callbacks = callbacks,
-            optimizer_cls_and_kwargs = optimizer_cls_and_kwargs,
-            preprocess_logits_for_metrics = preprocess_logits_for_metrics,
+            quantization_config = quantization_config,
             peft_config = peft_config,**kwargs)
         if "model" in locals() and hasattr(model, "for_inference"):
             model.for_inference()
@@ -3173,6 +2679,14 @@ Args:
             _pc = getattr(self, 'processing_class', None) or getattr(self, 'tokenizer', None)
             if _vllm_tok is not None and _pc is not None and getattr(_pc, 'chat_template', None) is not None and getattr(_vllm_tok, 'chat_template', None) is None:
                 _vllm_tok.chat_template = _pc.chat_template
+        pass
+        if getattr(self, 'aux_loss_enabled', False) and hasattr(getattr(self, 'model', None), 'config'):
+            _text_config = self.model.config
+            if hasattr(_text_config, 'get_text_config'): _text_config = _text_config.get_text_config()
+            _n_experts = [getattr(_text_config, _k) for _k in ('num_local_experts', 'num_experts', 'n_routed_experts', 'moe_num_experts') if isinstance(getattr(_text_config, _k, None), int)]
+            if _n_experts and all(_n == 0 for _n in _n_experts):
+                self.aux_loss_enabled = False
+                _text_config.output_router_logits = False
         pass
         
 pass
