@@ -46,7 +46,7 @@ paths:
   labels_out:          "{drive_root}/outputs/labels"
   models_out:          "{drive_root}/outputs/models"
   evaluation_out:      "{drive_root}/outputs/evaluation"
-  hf_cache:            "{drive_root}/hf_cache"     # caches model weights on Drive
+  hf_cache:            "/content/hf_cache"     # caches model weights on Drive
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 dataset:
