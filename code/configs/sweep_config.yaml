@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# configs/sweep_config.yaml
+# Hyperparameter sweep definition for hparam_sweep.py
+#
+# Run:
+#   python hparam_sweep.py --sweep configs/sweep_config.yaml --device_mode colab
+#   python hparam_sweep.py --sweep configs/sweep_config.yaml --dry_run     # preview only
+#
+# Keys are dotted paths into phase1_config.yaml (e.g. "lora.r" -> cfg["lora"]["r"]).
+# Total runs = (number of grid combinations) + (number of explicit `runs`).
+# ─────────────────────────────────────────────────────────────────────────────
+
+sweep_name: "lr_rank_epochs_v1"
+
+# Metric used to rank configs and pick the "best" one.
+#   judge_composite  -> LLM-judge composite (1-5), fine-tuned SLM        (default)
+#   cosine_sim       -> cosine similarity vs teacher label, fine-tuned SLM
+#   rouge_l          -> ROUGE-L vs teacher label, fine-tuned SLM
+#   latency_s        -> mean fine-tuned inference latency (LOWER is better)
+primary_metric: "judge_composite"
+
+# Overfitting penalty: ranked score = score - overfit_penalty * max(0, train-test gap).
+# 0 disables it. The score gap needs `evaluation.eval_all_splits: true` (set below); without it
+# the val-loss gap (val_best_eval_loss - train_final_loss) is used as a weaker proxy.
+overfit_penalty: 0.5
+
+# Which split the score is read from (test = held-out clusters).
+split: "test"
+
+# Re-use clustering / preprocessing / teacher labels already on disk
+# (they do not depend on LoRA hyper-parameters, and teacher calls cost money).
+reuse_data: true
+
+# Evaluate the un-tuned baseline SLM only in the first run. Its score does not
+# change with LoRA hyper-parameters, so re-running it only wastes time + judge tokens.
+baseline_once: true
+
+# Keep lora_alpha == lora.r whenever lora.r is swept (config default uses alpha = r).
+tie_lora_alpha_to_r: true
+
+# Overrides applied to EVERY run (e.g. keep sweeps cheap).
+base_overrides:
+  evaluation.eval_all_splits: true     # needed for train/val/test generalisation gap (costs more inference)
+  evaluation.run_bertscore: false
+  evaluation.judge_llm.n_samples: 50
+
+# ── Grid: every combination of these lists is run ────────────────────────────
+# NOTE: each run is a full fine-tune (~10-60 min on a T4 depending on model).
+# 2 x 3 = 6 runs here. Add `training.num_train_epochs: [3, 5]` to double it.
+grid:
+  training.learning_rate: [1.0e-4, 2.0e-4]
+  lora.r:                 [8, 16, 32]
+
+# ── Explicit extra runs (optional) ───────────────────────────────────────────
+# Each entry is a dict of overrides. Use for one-off ideas that don't fit a grid.
+runs: []
+#  - lora.r: 64
+#    training.learning_rate: 1.0e-4
+#    training.num_train_epochs: 5
+#  - lora.lora_dropout: 0.05
+#    prompts.include_domain_in_prompt: true

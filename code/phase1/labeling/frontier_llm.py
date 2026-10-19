@@ -71,6 +71,7 @@ def run_label_generation(
         top_k_details_col,
     )
     from phase1.prompts.templates import build_messages
+    from phase1.evaluation.latency import timed_teacher_call
 
     k          = cfg["top_k"]
     llm_cfg    = cfg["teacher_llm"]
@@ -112,9 +113,8 @@ def run_label_generation(
         for prompt_id in PROMPT_IDS:
             messages = build_messages(prompt_id, ticket_texts, cfg, domain)
 
-            t0 = time.time()
-            label = llm_caller(messages, llm_cfg)
-            elapsed = time.time() - t0
+            res = timed_teacher_call(llm_caller, messages, llm_cfg)   # phase1/evaluation/latency.py
+            label, elapsed = res["label"], res["latency_s"]
 
             if business_eval is not None:
                 business_eval.record_label_latency(cluster_id, prompt_id, elapsed)

@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-def run_phase1(cfg: dict) -> None:
+def run_phase1(cfg: dict) -> str:
+    """Run the Phase 1 pipeline. Returns the run directory path (str)."""
     from phase1.data.schema import (
         CLUSTER_ID, TICKET_RANK, TICKET_DETAILS,
         PROMPT_IDS, cluster_name_col,
@@ -78,6 +79,7 @@ def run_phase1(cfg: dict) -> None:
             raise FileNotFoundError(
                 f"evaluation.existing_run_dir not found: {existing_run}"
             )
+        run_dir     = existing_run
         eval_dir    = existing_run / "evaluation"
         adapter_dir = existing_run / "models" / "lora_adapter"
         eval_dir.mkdir(parents=True, exist_ok=True)
@@ -97,7 +99,11 @@ def run_phase1(cfg: dict) -> None:
         # Normal mode: generate a timestamped run directory
         slm_short = cfg["student_slm"]["model_id"].strip().split("/")[-1]
         epochs    = cfg["training"]["num_train_epochs"]
-        run_id    = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{slm_short}_ep{epochs}"
+        # Optional run_tag (set by hparam_sweep.py) keeps sweep runs from colliding
+        # when two configs start in the same minute with the same model/epochs.
+        run_tag   = cfg.get("run_tag")
+        tag_part  = f"_{run_tag}" if run_tag else ""
+        run_id    = f"{datetime.now().strftime('%Y%m%d_%H%M')}_{slm_short}_ep{epochs}{tag_part}"
         run_dir   = Path(paths["outputs"]) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,6 +116,11 @@ def run_phase1(cfg: dict) -> None:
         eval_dir    = run_dir / "evaluation"
         adapter_dir = run_dir / "models" / "lora_adapter"
         labeled_df  = None   # built during step 3
+
+        # Record the exact configuration that produced this run (independent variables)
+        import yaml
+        with open(run_dir / "config_used.yaml", "w", encoding="utf-8") as f_cfg:
+            yaml.safe_dump(cfg, f_cfg, sort_keys=False)
 
         logger.info(f"[pipeline] Run ID : {run_id}")
         logger.info(f"[pipeline] Outputs → {run_dir}")
@@ -376,6 +387,7 @@ def run_phase1(cfg: dict) -> None:
         f"  Results: {eval_dir}\n"
         f"{'=' * 60}"
     )
+    return str(run_dir)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -389,6 +401,7 @@ def _run_inference(
         PRED_CLUSTER_ID, PRED_PROMPT_ID, PRED_MODEL, PRED_FINE_TUNED, PRED_GENERATED_LABEL,
     )
     from phase1.finetuning.trainer import generate_label
+    from phase1.evaluation.latency import timed_slm_generate
     from phase1.prompts.templates  import build_inference_prompt
 
     device_mode = cfg["device_mode"]
@@ -422,9 +435,10 @@ def _run_inference(
                         generate_label(prompt_str, model, tokenizer, cfg, device_mode)
                     warmed = True
 
-                t0    = time.time()
-                label = generate_label(prompt_str, model, tokenizer, cfg, device_mode)
-                business_eval.record_inference_latency(cid, prompt_id, time.time() - t0, fine_tuned)
+                # GPU-synchronised timing (phase1/evaluation/latency.py)
+                res   = timed_slm_generate(prompt_str, model, tokenizer, cfg, device_mode)
+                label = res["label"]
+                business_eval.record_inference_latency(cid, prompt_id, res["latency_s"], fine_tuned)
 
                 f_out.write(json.dumps({
                     PRED_CLUSTER_ID:      int(cid),

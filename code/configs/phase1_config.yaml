@@ -194,7 +194,7 @@ evaluation:
   #                       Rates: Faithfulness, Specificity, Coherence.
   #                       Eliminates circular bias; useful for comparing all three models
   #                       on the same intrinsic scale.
-  judge_mode: "reference"
+  judge_mode: "reference_free"
   judge_llm:
     provider:    "anthropic"
     model:       "claude-haiku-4-5"

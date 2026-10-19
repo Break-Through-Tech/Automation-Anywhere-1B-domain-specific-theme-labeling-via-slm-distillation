@@ -189,7 +189,8 @@ def generate_label(
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=60,
+            # default 60 (unchanged); lower via student_slm.max_new_tokens to cut latency
+            max_new_tokens=int(cfg["student_slm"].get("max_new_tokens", 60)),
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
