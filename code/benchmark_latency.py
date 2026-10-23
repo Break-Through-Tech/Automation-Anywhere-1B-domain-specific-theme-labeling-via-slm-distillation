@@ -401,7 +401,7 @@ def main():
     if not args.skip_teacher and not os.environ.get("ANTHROPIC_API_KEY"):
         raise EnvironmentError("Set ANTHROPIC_API_KEY from Colab Secrets first")
     import torch
-    from transformers import AutoConfig, AutoTokenizer, BitsAndBytesConfig, Gemma3ForConditionalGeneration, GenerationConfig
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, Gemma3ForConditionalGeneration, GenerationConfig
     from peft import PeftModel, get_peft_model_state_dict
     from safetensors.torch import load_file, save_file
     if not torch.cuda.is_available():
@@ -442,7 +442,7 @@ def main():
     try:
         # Pin the resolved base revision across all model loads.
         bc = AutoConfig.from_pretrained(base_id, revision=args.base_revision, cache_dir=args.cache_dir)
-        if bc.model_type != "gemma3":
+        if bc.model_type not in ("gemma3", "qwen2"):
             raise ValueError(f"Expected Gemma 3 conditional-generation base, got {bc.model_type}")
         revision = getattr(bc, "_commit_hash", None)
         if not revision:
@@ -507,7 +507,7 @@ def main():
             import anthropic
             manifest["versions"]["anthropic"] = anthropic.__version__
             client = anthropic.Anthropic(max_retries=0, timeout=args.teacher_timeout_s)
-            sampling_kwargs = teacher_sampling_kwargs(client.messages.create, teacher_temp)
+            sampling_kwargs = {}  # API rejects temperature for this model; pipeline also drops it
             manifest["teacher_sampling_kwargs"] = sampling_kwargs
 
         def record(row):
@@ -588,7 +588,7 @@ def main():
                     torch.cuda.empty_cache()
                     t0 = time.perf_counter()
                     bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=dtype)
-                    model = Gemma3ForConditionalGeneration.from_pretrained(base_id, revision=revision, cache_dir=args.cache_dir,
+                    model = (Gemma3ForConditionalGeneration if bc.model_type == "gemma3" else AutoModelForCausalLM).from_pretrained(base_id, revision=revision, cache_dir=args.cache_dir,
                         quantization_config=bnb, torch_dtype=dtype, device_map={"": 0}, attn_implementation="sdpa")
                     if not getattr(model, "is_loaded_in_4bit", False):
                         raise RuntimeError("The base did not load in 4-bit mode")
