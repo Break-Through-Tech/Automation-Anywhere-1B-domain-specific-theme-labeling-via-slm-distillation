@@ -1,0 +1,4 @@
+model,predictions,clusters,faithfulness,specificity,coherence,composite
+teacher,20,4,5,4.1,5,4.7
+baseline,20,4,5,4,5,4.666666666666667
+finetuned,20,4,4.9,4.15,5,4.683333333333334
